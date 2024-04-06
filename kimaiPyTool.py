@@ -7,15 +7,26 @@ import json
 import sys
 import typing
 import requests
+import datetime
+import types
 from dataclasses import dataclass
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 JsonValue = typing.Union[None, int, str, bool, list["JsonValue"], "JsonObject"]
 JsonObject = dict[str, JsonValue]
 JsonList = list[JsonValue]
-
+RequestParam = dict[str, str]
 
 APP_NAME = "kimaiPyTool"
+KIMAI_TAG_FOR_GOOGLE_CALENDAR = "gcalendar"
+GOOGLE_API_SCOPES = ['https://www.googleapis.com/auth/calendar']
+GOOGLE_CLIENT_SECRET_FILE = 'google_api_secret.json'
+GOOGLE_TOKEN_FILE = 'google_token.json'
 
 
 T = typing.TypeVar("T")
@@ -23,15 +34,29 @@ def jsonObject2NamedTuple(cls: type[T], jsonObject: JsonObject) -> T:
     if type(jsonObject) is not dict:
         raise TypeError('Unexpected type for {}, expected {}, get {}'
                 .format(jsonObject, dict, type(jsonObject)))
-    d = dict() # type: ignore
+    d:dict[str, typing.Any] = dict()
     for fieldName, fieldType in cls.__annotations__.items():
         if fieldName not in jsonObject:
+            if (typing.get_origin(fieldType) in [typing.Union, types.UnionType]
+                    and isinstance(None, typing.get_args(fieldType))):
+                d[fieldName] = None
+                continue
             raise ValueError("{} not found in {}".format(fieldName, jsonObject))
-        if not isinstance(jsonObject[fieldName], fieldType):
-            raise TypeError('Unexpected type for field {} in {}, expected {}, get {}'
+        typeOk = False
+        if typing.get_origin(fieldType) is None:
+            typeOk = isinstance(jsonObject[fieldName], fieldType)
+        elif typing.get_origin(fieldType) in [typing.Union, types.UnionType]:
+            typeOk = isinstance(jsonObject[fieldName], typing.get_args(fieldType))
+        elif typing.get_origin(fieldType) is list and len(typing.get_args(fieldType)) == 1:
+            typeOk = (type(jsonObject[fieldName]) is list and
+                all(isinstance(x, typing.get_args(fieldType)[0]) for x in jsonObject[fieldName])) # type: ignore
+        else:
+            raise NotImplementedError("The type {} is not suported yet".format(typing.get_origin(fieldType)))
+        if not typeOk:
+            raise TypeError('Unexpected type for field "{}" in {}, expected {}, get {}'
                     .format(fieldName, jsonObject, fieldType, type(jsonObject[fieldName])))
         d[fieldName] = jsonObject[fieldName]
-    return cls(**d) # type: ignore
+    return cls(**d)
 
 
 class Kimai:
@@ -43,23 +68,27 @@ class Kimai:
     def _buildheader(self):
         return {"X-AUTH-USER": self._username, "X-AUTH-TOKEN": self._password}
 
-    def _runGetRequest(self, method: str):
-        return requests.get(self._url + "/" + method, headers=self._buildheader())
-
-    def _runPostRequest(self, method: str, data: JsonObject):
-        return requests.post(self._url + "/" + method, headers=self._buildheader(), data=data).json()
+    def _runRequest(self, method:str, urlSufix: str, params:RequestParam|None={}, data: JsonObject|None=None):
+        response = requests.request(method, self._url + "/" + urlSufix, params=params, headers=self._buildheader(), data=data)
+        if response.status_code != 200:
+            print('For request "{}" get {}'.format(response.url, response.json()), file=sys.stderr)
+            sys.exit(1)
+        return response.json()
 
     def getCustomers(self) -> JsonList:
-        return self._runGetRequest("customers").json()
+        return self._runRequest("get", "customers")
 
     def getProjects(self) -> JsonList:
-        return self._runGetRequest("projects").json()
+        return self._runRequest("get", "projects")
 
     def getActivities(self) -> JsonList:
-        return self._runGetRequest("activities").json()
+        return self._runRequest("get", "activities")
 
-    def getTimesheets(self) -> JsonList:
-        return self._runGetRequest("timesheets").json()
+    def getTimesheets(self, begin:str|None=None) -> JsonList:
+        params:RequestParam = dict()
+        if begin is not None:
+            params["begin"] = begin
+        return self._runRequest("get", "timesheets", params)
 
     def addTimesheet(self, userId: int, projectId: int, activityId: int, begin: str, end: str,
             description: str) -> JsonObject:
@@ -70,7 +99,12 @@ class Kimai:
         data["begin"] = begin
         data["end"] = end
         data["description"] = description
-        return self._runPostRequest("timesheets", data)
+        return self._runRequest("post", "timesheets", data=data)
+
+    def addTimesheetTag(self, timeSheetId: int, tags: list[str]) -> JsonObject:
+        data = JsonObject()
+        data["tags"] = typing.cast(JsonList, tags)
+        return self._runRequest("patch", "timesheets/{}".format(timeSheetId), data=data)
 
 
 class KimaiCustomer(typing.NamedTuple):
@@ -108,9 +142,9 @@ class KimaiProject(typing.NamedTuple):
     customer: int
     id: int
     name: str
-    start: None|str
-    end: None|str
-    comment: None|str
+    start: str|None
+    end: str|None
+    comment: str|None
     visible: bool
     billable: bool
 
@@ -194,6 +228,7 @@ class KimaiTimeSheet(typing.NamedTuple):
     description: str
     exported: bool
     billable: bool
+    tags: list[str]
 
 
 class KimaiTimeSheets:
@@ -210,6 +245,9 @@ class KimaiTimeSheets:
     def get(self, id: int) -> KimaiTimeSheet:
         return self._timeSheetsById[id]
 
+    def values(self):
+        return self._timeSheetsById.values()
+
 
 def getConfigPath(fileName: str) -> str:
     configPath = os.path.join(pathlib.Path.home(), ".config", APP_NAME, fileName)
@@ -223,6 +261,69 @@ class Config:
     kimaiUrl: str|None = None
     kimaiUsername: str|None = None
     kimaiToken: str|None = None
+    gCalendarEmail: str|None = None
+
+    def toJson(self) -> JsonObject:
+        toReturn: JsonObject = dict()
+        if self.kimaiUrl is not None:
+            toReturn["kimaiUrl"] = self.kimaiUrl
+        if self.kimaiUsername is not None:
+            toReturn["kimaiUsername"] = self.kimaiUsername
+        if self.kimaiToken is not None:
+            toReturn["kimaiToken"] = self.kimaiToken
+        if self.gCalendarEmail is not None:
+            toReturn["gCalendarEmail"] = self.gCalendarEmail
+        return toReturn
+
+
+def googleApiGetCredentials(secretFilePath: str, tokenFilePath: str):
+    credentials = None
+    if os.path.exists(tokenFilePath):
+        credentials = Credentials.from_authorized_user_file(tokenFilePath, GOOGLE_API_SCOPES)
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(secretFilePath, GOOGLE_API_SCOPES)
+            credentials = flow.run_local_server(port=0)
+            with open(tokenFilePath, "w") as token:
+                token.write(credentials.to_json())
+    return credentials
+
+
+class GCalendarEvent(typing.NamedTuple):
+    summary: str
+    start: str
+    end: str
+    description: str|None
+
+    @classmethod
+    def fromKimaiTimeSheet(cls, timeSheet: KimaiTimeSheet, clientName: str, projectName: str,
+            activityName: str):
+        return cls(" - ".join([clientName, projectName, activityName]), timeSheet.begin,
+                timeSheet.end, timeSheet.description)
+
+    def toJson(self) -> JsonObject:
+        toReturn: JsonObject = dict()
+        toReturn["summary"] = self.summary
+        toReturn["start"] = dict()
+        toReturn["start"]["dateTime"] = self.start
+        toReturn["end"] = dict()
+        toReturn["end"]["dateTime"] = self.end
+        if self.description is not None:
+            toReturn["description"] = self.description
+        return toReturn
+
+
+def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, service):
+    try:
+        event = service.events().insert(calendarId=calendarEmail, body=event.toJson()).execute()
+        print('Event created: {}'.format(event.get('htmlLink')))
+    except HttpError as err:
+        message = str(err)
+        if err.resp.get('content-type', '').startswith('application/json'):
+            message = json.loads(err.content).get('error').get('errors')[0].get('message')
+        print('Error while pushing event "{}" at {}: "{}"'.format(event.summary, event.start, message))
 
 
 if __name__ == '__main__':
@@ -238,11 +339,15 @@ if __name__ == '__main__':
     groupAction.add_argument('--getTimesheets', action='store_true',
             help="Display a json list of timesheets")
     groupAction.add_argument('--setTimesheets', type=str, help="Import events from file")
+    groupAction.add_argument('--toGCalendar', type=lambda s: datetime.datetime.strptime(s,
+            '%Y-%m-%d'), help="Copy events from the given date in format YYYY-MM-DD not tag {} to "
+            "Google calendar".format(KIMAI_TAG_FOR_GOOGLE_CALENDAR))
     parser.add_argument("--kimaiUrl", type=str, help="The Kimai url with protocol and /api "
             "exemple http://nas.local:8001/api")
     parser.add_argument("--kimaiUsername", type=str, help="The Kimai username")
     parser.add_argument("--kimaiToken", type=str, help="The Kimai API token")
     parser.add_argument("--kimaiUserId", type=int, help="The user identifier to set timesheets")
+    parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google calendar")
     args = parser.parse_args()
 
     configData = Config()
@@ -257,10 +362,12 @@ if __name__ == '__main__':
         configData.kimaiUsername = args.kimaiUsername
     if args.kimaiToken:
         configData.kimaiToken = args.kimaiToken
+    if args.gCalendarEmail:
+        configData.gCalendarEmail = args.gCalendarEmail
 
     if args.configure:
         with open(configPath, 'w') as configFile:
-            json.dump(configData, configFile, indent=4)
+            json.dump(configData.toJson(), configFile, indent=4)
             configFile.write('\n')
         os.chmod(configPath, 0o600)
         sys.exit(0)
@@ -317,3 +424,34 @@ if __name__ == '__main__':
             timeSheet = kiman.addTimesheet(args.kimaiUserId, projectId, activityId,
                     eventData["begin"], eventData["end"], eventData["description"])
             print(timeSheet)
+
+    if args.toGCalendar:
+        if configData.gCalendarEmail is None:
+            print("google calendar email addess not defined", file=sys.stderr)
+            sys.exit(1)
+        begin = datetime.datetime.isoformat(args.toGCalendar)
+        timeSheets = KimaiTimeSheets(kiman.getTimesheets(begin=begin))
+        googleCalendarService = None
+        customers = KimaiCustomers(kiman.getCustomers())
+        projects = KimaiProjects(kiman.getProjects())
+        activities = KimaiActivities(kiman.getActivities())
+        for timeSheet in timeSheets.values():
+            if KIMAI_TAG_FOR_GOOGLE_CALENDAR not in timeSheet.tags:
+                if googleCalendarService is None:
+                    if not os.path.exists(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)):
+                        print("You pust generate a google API OAuth 2.0 token file from "
+                                "https://developers.google.com/google-apps/calendar/quickstart/python#prerequisites"
+                                " and copy it in {}".format(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)),
+                                file=sys.stderr)
+                        sys.exit(1)
+                    googleCredentials = googleApiGetCredentials(getConfigPath(
+                        GOOGLE_CLIENT_SECRET_FILE), getConfigPath(GOOGLE_TOKEN_FILE))
+                    googleCalendarService = build("calendar", "v3", credentials=googleCredentials)
+                project = projects.get(timeSheet.project)
+                googleCalendarEvent = GCalendarEvent.fromKimaiTimeSheet(timeSheet, customers.get(project.customer).name,
+                        project.name, activities.get(timeSheet.activity).name)
+                googleApiPushEventToCalendar(googleCalendarEvent, configData.gCalendarEmail,
+                        googleCalendarService)
+                tags = timeSheet.tags
+                tags.append(KIMAI_TAG_FOR_GOOGLE_CALENDAR)
+                kiman.addTimesheetTag(timeSheet.id, tags)
