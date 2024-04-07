@@ -9,7 +9,8 @@ import typing
 import requests
 import datetime
 import types
-from dataclasses import dataclass
+import locale
+import dataclasses
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -256,7 +257,7 @@ def getConfigPath(fileName: str) -> str:
     return configPath
 
 
-@dataclass
+@dataclasses.dataclass
 class Config:
     kimaiUrl: str|None = None
     kimaiUsername: str|None = None
@@ -326,6 +327,76 @@ def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, serv
         print('Error while pushing event "{}" at {}: "{}"'.format(event.summary, event.start, message))
 
 
+@dataclasses.dataclass
+class CraItem:
+    duration: int = 0
+    description: set[str] = dataclasses.field(default_factory=set)
+
+
+def generateCraFiles(begin: datetime.datetime):
+        beginStr = datetime.datetime.isoformat(begin)
+        end = datetime.date.today()
+        timeSheets = KimaiTimeSheets(kiman.getTimesheets(begin=beginStr))
+        customers = KimaiCustomers(kiman.getCustomers())
+        projects = KimaiProjects(kiman.getProjects())
+        activities = KimaiActivities(kiman.getActivities())
+        craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] = dict()
+        locale.setlocale(locale.LC_ALL, locale.getlocale())
+        dateFormat = locale.nl_langinfo(locale.D_FMT)
+        activitiesByCustomerProject: dict[str, dict[str, set[str]]] = dict()
+        for timeSheet in timeSheets.values():
+            # Get time sheet data
+            date = datetime.datetime.fromisoformat(timeSheet.begin).date()
+            project = projects.get(timeSheet.project)
+            customerName = customers.get(project.customer).name
+            activityName = activities.get(timeSheet.activity).name
+            # Add to CRA
+            if customerName not in craByCustomerDateProjectActivity:
+                craByCustomerDateProjectActivity[customerName] = dict()
+            if date not in craByCustomerDateProjectActivity[customerName]:
+                craByCustomerDateProjectActivity[customerName][date] = dict()
+            if project.name not in craByCustomerDateProjectActivity[customerName][date]:
+                craByCustomerDateProjectActivity[customerName][date][project.name] = dict()
+            if activityName not in craByCustomerDateProjectActivity[customerName][date][project.name]:
+                craByCustomerDateProjectActivity[customerName][date][project.name][activityName] = CraItem()
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].duration += timeSheet.duration
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].description.add(timeSheet.description)
+            # Add to activitiesByCustomerProject
+            if customerName not in activitiesByCustomerProject:
+                activitiesByCustomerProject[customerName] = dict()
+            if project.name not in activitiesByCustomerProject[customerName]:
+                activitiesByCustomerProject[customerName][project.name] = set()
+            activitiesByCustomerProject[customerName][project.name].add(activityName)
+        # Write file by customer
+        for customerName, craByDateProjectActivity in craByCustomerDateProjectActivity.items():
+            with open("{}_CRA_{}.tsv".format(end.strftime("%Y-%m"), customerName), "w") as craFile:
+                # write header
+                headerLine1 = "\t"
+                headerLine2 = "Date\tTotal (hour)"
+                for projectName, activities in activitiesByCustomerProject[customerName].items():
+                    for activityName in activities:
+                        headerLine1 += "\t"+projectName
+                        headerLine2 += "\t"+activityName
+                headerLine2 += "\tDescription"
+                craFile.write(headerLine1+"\n")
+                craFile.write(headerLine2+"\n")
+                # Write a line by date
+                for date, craByProjectActivity in sorted(craByDateProjectActivity.items()):
+                    durationSum = 0.0
+                    dataLine = ""
+                    description: set[str] = set()
+                    for projectName, activities in activitiesByCustomerProject[customerName].items():
+                        for activityName in activities:
+                            craItem = craByProjectActivity.get(projectName, dict()).get(activityName, CraItem())
+                            durationSum += craItem.duration
+                            description.update(craItem.description)
+                            dataLine += "\t"
+                            if craItem.duration != 0:
+                                dataLine += locale.str(craItem.duration/3600)
+                    craFile.write("{}\t{}{}\t{}\n".format(date.strftime(dateFormat),
+                            locale.str(durationSum/3600), dataLine, ", ".join(description)))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Kimai cli tool")
     groupAction = parser.add_mutually_exclusive_group(required=True)
@@ -342,12 +413,18 @@ if __name__ == '__main__':
     groupAction.add_argument('--toGCalendar', type=lambda s: datetime.datetime.strptime(s,
             '%Y-%m-%d'), help="Copy events from the given date in format YYYY-MM-DD not tag {} to "
             "Google calendar".format(KIMAI_TAG_FOR_GOOGLE_CALENDAR))
+    groupAction.add_argument('--cra', type=lambda s: datetime.datetime.strptime(s,
+            '%Y-%m-%d'), help="Generate a file in current dir for each customer with one line by "
+            "day, project and activity with duration in hour and description")
     parser.add_argument("--kimaiUrl", type=str, help="The Kimai url with protocol and /api "
-            "exemple http://nas.local:8001/api")
-    parser.add_argument("--kimaiUsername", type=str, help="The Kimai username")
-    parser.add_argument("--kimaiToken", type=str, help="The Kimai API token")
+            "exemple http://nas.local:8001/api (can be saved in config file)")
+    parser.add_argument("--kimaiUsername", type=str, help="The Kimai username (can be saved in "
+            "config file)")
+    parser.add_argument("--kimaiToken", type=str, help="The Kimai API token (can be saved in config"
+            "file)")
+    parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google "
+            "calendar (can be saved in config file)")
     parser.add_argument("--kimaiUserId", type=int, help="The user identifier to set timesheets")
-    parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google calendar")
     args = parser.parse_args()
 
     configData = Config()
@@ -455,3 +532,6 @@ if __name__ == '__main__':
                 tags = timeSheet.tags
                 tags.append(KIMAI_TAG_FOR_GOOGLE_CALENDAR)
                 kiman.addTimesheetTag(timeSheet.id, tags)
+
+    if args.cra:
+        generateCraFiles(args.cra)
