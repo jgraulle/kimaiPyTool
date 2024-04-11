@@ -1,6 +1,8 @@
 #!/usr/bin/python3
+# PYTHON_ARGCOMPLETE_OK
 
 import argparse
+import argcomplete
 import os
 import pathlib
 import json
@@ -54,6 +56,10 @@ def jsonObject2NamedTuple(cls: type[T], jsonObject: JsonObject) -> T:
         else:
             raise NotImplementedError("The type {} is not suported yet".format(typing.get_origin(fieldType)))
         if not typeOk:
+            if jsonObject[fieldName] is None:
+                print("The field {} cannot be None in {}".format(fieldName, jsonObject),
+                      file=sys.stderr)
+                sys.exit(1)
             raise TypeError('Unexpected type for field "{}" in {}, expected {}, get {}'
                     .format(fieldName, jsonObject, fieldType, type(jsonObject[fieldName])))
         d[fieldName] = jsonObject[fieldName]
@@ -425,6 +431,7 @@ if __name__ == '__main__':
     parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google "
             "calendar (can be saved in config file)")
     parser.add_argument("--kimaiUserId", type=int, help="The user identifier to set timesheets")
+    argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     configData = Config()
