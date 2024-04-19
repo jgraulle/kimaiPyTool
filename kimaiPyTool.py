@@ -80,6 +80,9 @@ class Kimai:
         if response.status_code != 200:
             print('For request "{}" get {}'.format(response.url, response.json()), file=sys.stderr)
             sys.exit(1)
+        if response.headers.get("X-Total-Pages", "1") != "1":
+            print('For request "{}" get too much result: {}'.format(response.url, response.headers["X-Total-Count"]), file=sys.stderr)
+            sys.exit(1)
         return response.json()
 
     def getCustomers(self) -> JsonList:
@@ -91,10 +94,18 @@ class Kimai:
     def getActivities(self) -> JsonList:
         return self._runRequest("get", "activities")
 
-    def getTimesheets(self, begin:str|None=None) -> JsonList:
-        params:RequestParam = dict()
+    def getActivity(self, id: int) -> JsonObject:
+        return self._runRequest("get", "activities/{}".format(id))
+
+    def updateActivity(self, id: int, data: JsonObject) -> JsonObject:
+        return self._runRequest("patch", "activities/{}".format(id), data=data)
+
+    def getTimesheets(self, begin:str|None=None, maxItem: int|None=None) -> JsonList:
+        params:RequestParam = RequestParam()
         if begin is not None:
             params["begin"] = begin
+        if maxItem is not None:
+            params["size"] = str(maxItem)
         return self._runRequest("get", "timesheets", params)
 
     def addTimesheet(self, userId: int, projectId: int, activityId: int, begin: str, end: str,
@@ -332,6 +343,29 @@ def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, serv
             message = json.loads(err.content).get('error').get('errors')[0].get('message')
         print('Error while pushing event "{}" at {}: "{}"'.format(event.summary, event.start, message))
 
+def importEventFile(timesheetsFilePath: str, kimaiUserId: int, kimai: Kimai):
+        with open(timesheetsFilePath, 'r') as eventsFile:
+            eventsData = json.loads(eventsFile.read())
+        projects = KimaiProjects(kimai.getProjects())
+        activities = KimaiActivities(kimai.getActivities())
+        for eventData in eventsData:
+            projectName = eventData["projectName"]
+            projectId = projects.getIdByName(projectName)
+            activityId = None
+            if "activityName" in eventData:
+                activityName = eventData["activityName"]
+                activityId = activities.getIdByName(activityName)
+            else:
+                activitiesIds = activities.getIdsByProjectId(projectId)
+                if len(activitiesIds) != 1:
+                    print("For project {} we have no or several activities {}".format(projectName),
+                            file=sys.stderr)
+                    sys.exit(1)
+                activityId = activitiesIds[0]
+            timeSheet = kimai.addTimesheet(kimaiUserId, projectId, activityId,
+                    eventData["begin"], eventData["end"], eventData["description"])
+            print(timeSheet)
+
 
 @dataclasses.dataclass
 class CraItem:
@@ -339,68 +373,98 @@ class CraItem:
     description: set[str] = dataclasses.field(default_factory=set)
 
 
-def generateCraFiles(begin: datetime.datetime):
-        beginStr = datetime.datetime.isoformat(begin)
-        end = datetime.date.today()
-        timeSheets = KimaiTimeSheets(kiman.getTimesheets(begin=beginStr))
-        customers = KimaiCustomers(kiman.getCustomers())
-        projects = KimaiProjects(kiman.getProjects())
-        activities = KimaiActivities(kiman.getActivities())
-        craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] = dict()
-        locale.setlocale(locale.LC_ALL, locale.getlocale())
-        dateFormat = locale.nl_langinfo(locale.D_FMT)
-        activitiesByCustomerProject: dict[str, dict[str, set[str]]] = dict()
-        for timeSheet in timeSheets.values():
-            # Get time sheet data
-            date = datetime.datetime.fromisoformat(timeSheet.begin).date()
+def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str):
+    beginStr = datetime.datetime.isoformat(begin)
+    timeSheets = KimaiTimeSheets(kimai.getTimesheets(begin=beginStr))
+    googleCalendarService = None
+    customers = KimaiCustomers(kimai.getCustomers())
+    projects = KimaiProjects(kimai.getProjects())
+    activities = KimaiActivities(kimai.getActivities())
+    for timeSheet in timeSheets.values():
+        if KIMAI_TAG_FOR_GOOGLE_CALENDAR not in timeSheet.tags:
+            if googleCalendarService is None:
+                if not os.path.exists(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)):
+                    print("You pust generate a google API OAuth 2.0 token file from "
+                            "https://developers.google.com/google-apps/calendar/quickstart/python#prerequisites"
+                            " and copy it in {}".format(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)),
+                            file=sys.stderr)
+                    sys.exit(1)
+                googleCredentials = googleApiGetCredentials(getConfigPath(
+                    GOOGLE_CLIENT_SECRET_FILE), getConfigPath(GOOGLE_TOKEN_FILE))
+                googleCalendarService = build("calendar", "v3", credentials=googleCredentials)
             project = projects.get(timeSheet.project)
-            customerName = customers.get(project.customer).name
-            activityName = activities.get(timeSheet.activity).name
-            # Add to CRA
-            if customerName not in craByCustomerDateProjectActivity:
-                craByCustomerDateProjectActivity[customerName] = dict()
-            if date not in craByCustomerDateProjectActivity[customerName]:
-                craByCustomerDateProjectActivity[customerName][date] = dict()
-            if project.name not in craByCustomerDateProjectActivity[customerName][date]:
-                craByCustomerDateProjectActivity[customerName][date][project.name] = dict()
-            if activityName not in craByCustomerDateProjectActivity[customerName][date][project.name]:
-                craByCustomerDateProjectActivity[customerName][date][project.name][activityName] = CraItem()
-            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].duration += timeSheet.duration
-            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].description.add(timeSheet.description)
-            # Add to activitiesByCustomerProject
-            if customerName not in activitiesByCustomerProject:
-                activitiesByCustomerProject[customerName] = dict()
-            if project.name not in activitiesByCustomerProject[customerName]:
-                activitiesByCustomerProject[customerName][project.name] = set()
-            activitiesByCustomerProject[customerName][project.name].add(activityName)
-        # Write file by customer
-        for customerName, craByDateProjectActivity in craByCustomerDateProjectActivity.items():
-            with open("{}_CRA_{}.tsv".format(end.strftime("%Y-%m"), customerName), "w") as craFile:
-                # write header
-                headerLine1 = "\t"
-                headerLine2 = "Date\tTotal (hour)"
+            googleCalendarEvent = GCalendarEvent.fromKimaiTimeSheet(timeSheet, customers.get(project.customer).name,
+                    project.name, activities.get(timeSheet.activity).name)
+            googleApiPushEventToCalendar(googleCalendarEvent, gCalendarEmail,
+                    googleCalendarService)
+            tags = timeSheet.tags
+            tags.append(KIMAI_TAG_FOR_GOOGLE_CALENDAR)
+            kimai.addTimesheetTag(timeSheet.id, tags)
+
+
+def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
+    beginStr = datetime.datetime.isoformat(begin)
+    end = datetime.date.today()
+    timeSheets = KimaiTimeSheets(kimai.getTimesheets(begin=beginStr, maxItem=100))
+    customers = KimaiCustomers(kimai.getCustomers())
+    projects = KimaiProjects(kimai.getProjects())
+    activities = KimaiActivities(kimai.getActivities())
+    craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] = dict()
+    locale.setlocale(locale.LC_ALL, locale.getlocale())
+    dateFormat = locale.nl_langinfo(locale.D_FMT)
+    activitiesByCustomerProject: dict[str, dict[str, set[str]]] = dict()
+    for timeSheet in timeSheets.values():
+        # Get time sheet data
+        date = datetime.datetime.fromisoformat(timeSheet.begin).date()
+        project = projects.get(timeSheet.project)
+        customerName = customers.get(project.customer).name
+        activityName = activities.get(timeSheet.activity).name
+        # Add to CRA
+        if customerName not in craByCustomerDateProjectActivity:
+            craByCustomerDateProjectActivity[customerName] = dict()
+        if date not in craByCustomerDateProjectActivity[customerName]:
+            craByCustomerDateProjectActivity[customerName][date] = dict()
+        if project.name not in craByCustomerDateProjectActivity[customerName][date]:
+            craByCustomerDateProjectActivity[customerName][date][project.name] = dict()
+        if activityName not in craByCustomerDateProjectActivity[customerName][date][project.name]:
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName] = CraItem()
+        craByCustomerDateProjectActivity[customerName][date][project.name][activityName].duration += timeSheet.duration
+        for descriptionLine in timeSheet.description.replace("\r", "").split("\n"):
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].description.add(descriptionLine)
+        # Add to activitiesByCustomerProject
+        if customerName not in activitiesByCustomerProject:
+            activitiesByCustomerProject[customerName] = dict()
+        if project.name not in activitiesByCustomerProject[customerName]:
+            activitiesByCustomerProject[customerName][project.name] = set()
+        activitiesByCustomerProject[customerName][project.name].add(activityName)
+    # Write file by customer
+    for customerName, craByDateProjectActivity in craByCustomerDateProjectActivity.items():
+        with open("{}_CRA_{}.tsv".format(end.strftime("%Y-%m"), customerName), "w") as craFile:
+            # write header
+            headerLine1 = "\t"
+            headerLine2 = "Date\tTotal (hour)"
+            for projectName, activities in activitiesByCustomerProject[customerName].items():
+                for activityName in activities:
+                    headerLine1 += "\t"+projectName
+                    headerLine2 += "\t"+activityName
+            headerLine2 += "\tDescription"
+            craFile.write(headerLine1+"\n")
+            craFile.write(headerLine2+"\n")
+            # Write a line by date
+            for date, craByProjectActivity in sorted(craByDateProjectActivity.items()):
+                durationSum = 0.0
+                dataLine = ""
+                description: set[str] = set()
                 for projectName, activities in activitiesByCustomerProject[customerName].items():
                     for activityName in activities:
-                        headerLine1 += "\t"+projectName
-                        headerLine2 += "\t"+activityName
-                headerLine2 += "\tDescription"
-                craFile.write(headerLine1+"\n")
-                craFile.write(headerLine2+"\n")
-                # Write a line by date
-                for date, craByProjectActivity in sorted(craByDateProjectActivity.items()):
-                    durationSum = 0.0
-                    dataLine = ""
-                    description: set[str] = set()
-                    for projectName, activities in activitiesByCustomerProject[customerName].items():
-                        for activityName in activities:
-                            craItem = craByProjectActivity.get(projectName, dict()).get(activityName, CraItem())
-                            durationSum += craItem.duration
-                            description.update(craItem.description)
-                            dataLine += "\t"
-                            if craItem.duration != 0:
-                                dataLine += locale.str(craItem.duration/3600)
-                    craFile.write("{}\t{}{}\t{}\n".format(date.strftime(dateFormat),
-                            locale.str(durationSum/3600), dataLine, ", ".join(description)))
+                        craItem = craByProjectActivity.get(projectName, dict()).get(activityName, CraItem())
+                        durationSum += craItem.duration
+                        description.update(craItem.description)
+                        dataLine += "\t"
+                        if craItem.duration != 0:
+                            dataLine += locale.str(craItem.duration/3600)
+                craFile.write("{}\t{}{}\t{}\n".format(date.strftime(dateFormat),
+                        locale.str(durationSum/3600), dataLine, ", ".join(description).replace("\t", " ")))
 
 
 if __name__ == '__main__':
@@ -413,6 +477,10 @@ if __name__ == '__main__':
             help="Display a json list of projects")
     groupAction.add_argument('--getActivities', action='store_true',
             help="Display a json list of activities")
+    groupAction.add_argument('--getActivity', type=int,
+            help="Display a json object of the given activity")
+    groupAction.add_argument('--updateActivity', type=int,
+            help="Update the given activity")
     groupAction.add_argument('--getTimesheets', action='store_true',
             help="Display a json list of timesheets")
     groupAction.add_argument('--setTimesheets', type=str, help="Import events from file")
@@ -431,6 +499,8 @@ if __name__ == '__main__':
     parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google "
             "calendar (can be saved in config file)")
     parser.add_argument("--kimaiUserId", type=int, help="The user identifier to set timesheets")
+    parser.add_argument("--timeBudget", type=float, help="When use --updateActivity update the time "
+            "budget with the given time in hour")
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
@@ -465,80 +535,45 @@ if __name__ == '__main__':
     if configData.kimaiToken == None:
         print("kimai password is not defined", file=sys.stderr)
         sys.exit(1)
-    kiman = Kimai(configData.kimaiUrl, configData.kimaiUsername, configData.kimaiToken)
+    kimai = Kimai(configData.kimaiUrl, configData.kimaiUsername, configData.kimaiToken)
 
     if args.getCustomers:
-        json.dump(kiman.getCustomers(), sys.stdout, indent=4)
+        json.dump(kimai.getCustomers(), sys.stdout, indent=4)
 
     if args.getProjects:
-        json.dump(kiman.getProjects(), sys.stdout, indent=4)
+        json.dump(kimai.getProjects(), sys.stdout, indent=4)
 
     if args.getActivities:
-        json.dump(kiman.getActivities(), sys.stdout, indent=4)
+        json.dump(kimai.getActivities(), sys.stdout, indent=4)
+
+    if args.getActivity:
+        json.dump(kimai.getActivity(args.getActivity), sys.stdout, indent=4)
+
+    if args.updateActivity:
+        data = JsonObject()
+        if args.timeBudget:
+            data["timeBudget"] = args.timeBudget
+        if len(data)==0:
+            print("You must use at least one argument associate with the command updateActivity",
+                    file=sys.stderr)
+            sys.exit(1)
+        json.dump(kimai.updateActivity(args.updateActivity, data), sys.stdout, indent=4)
 
     if args.getTimesheets:
-        json.dump(kiman.getTimesheets(), sys.stdout, indent=4)
+        json.dump(kimai.getTimesheets(), sys.stdout, indent=4)
 
     if args.setTimesheets:
         if not args.kimaiUserId:
             print("You must define the kimai user id to import data with console argument",
                     file=sys.stderr)
             sys.exit(1)
-        with open(args.setTimesheets, 'r') as eventsFile:
-            eventsData = json.loads(eventsFile.read())
-        customers = KimaiCustomers(kiman.getCustomers())
-        projects = KimaiProjects(kiman.getProjects())
-        activities = KimaiActivities(kiman.getActivities())
-        for eventData in eventsData:
-            clientName = eventData["clientName"]
-            clientId = customers.getIdByName(clientName)
-            projectName = eventData["projectName"]
-            projectId = projects.getIdByName(projectName)
-            activityId = None
-            if "activityName" in eventData:
-                activityName = eventData["activityName"]
-                activityId = activities.getIdByName(activityName)
-            else:
-                activitiesIds = activities.getIdsByProjectId(projectId)
-                if len(activitiesIds) != 1:
-                    print("For project {} we have no or several activities {}".format(projectName),
-                            file=sys.stderr)
-                    sys.exit(1)
-                activityId = activitiesIds[0]
-            timeSheet = kiman.addTimesheet(args.kimaiUserId, projectId, activityId,
-                    eventData["begin"], eventData["end"], eventData["description"])
-            print(timeSheet)
+        importEventFile(args.setTimesheets, args.kimaiUserId, kimai)
 
     if args.toGCalendar:
         if configData.gCalendarEmail is None:
             print("google calendar email addess not defined", file=sys.stderr)
             sys.exit(1)
-        begin = datetime.datetime.isoformat(args.toGCalendar)
-        timeSheets = KimaiTimeSheets(kiman.getTimesheets(begin=begin))
-        googleCalendarService = None
-        customers = KimaiCustomers(kiman.getCustomers())
-        projects = KimaiProjects(kiman.getProjects())
-        activities = KimaiActivities(kiman.getActivities())
-        for timeSheet in timeSheets.values():
-            if KIMAI_TAG_FOR_GOOGLE_CALENDAR not in timeSheet.tags:
-                if googleCalendarService is None:
-                    if not os.path.exists(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)):
-                        print("You pust generate a google API OAuth 2.0 token file from "
-                                "https://developers.google.com/google-apps/calendar/quickstart/python#prerequisites"
-                                " and copy it in {}".format(getConfigPath(GOOGLE_CLIENT_SECRET_FILE)),
-                                file=sys.stderr)
-                        sys.exit(1)
-                    googleCredentials = googleApiGetCredentials(getConfigPath(
-                        GOOGLE_CLIENT_SECRET_FILE), getConfigPath(GOOGLE_TOKEN_FILE))
-                    googleCalendarService = build("calendar", "v3", credentials=googleCredentials)
-                project = projects.get(timeSheet.project)
-                googleCalendarEvent = GCalendarEvent.fromKimaiTimeSheet(timeSheet, customers.get(project.customer).name,
-                        project.name, activities.get(timeSheet.activity).name)
-                googleApiPushEventToCalendar(googleCalendarEvent, configData.gCalendarEmail,
-                        googleCalendarService)
-                tags = timeSheet.tags
-                tags.append(KIMAI_TAG_FOR_GOOGLE_CALENDAR)
-                kiman.addTimesheetTag(timeSheet.id, tags)
+        kimaiToGCalendar(args.toGCalendar, kimai, configData.gCalendarEmail)
 
     if args.cra:
-        generateCraFiles(args.cra)
+        generateCraFiles(args.cra, kimai)
