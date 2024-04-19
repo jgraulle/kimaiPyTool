@@ -8,11 +8,16 @@ import pathlib
 import json
 import sys
 import typing
+import openpyxl.cell
+import openpyxl.worksheet
+import openpyxl.worksheet.worksheet
 import requests
 import datetime
 import types
 import locale
 import dataclasses
+import openpyxl
+import copy
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -20,7 +25,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 
-JsonValue = typing.Union[None, int, str, bool, list["JsonValue"], "JsonObject"]
+JsonValue = typing.Union[None, int, float, str, bool, list["JsonValue"], "JsonObject"]
 JsonObject = dict[str, JsonValue]
 JsonList = list[JsonValue]
 RequestParam = dict[str, str]
@@ -385,6 +390,8 @@ class Config:
     kimaiUsername: str|None = None
     kimaiToken: str|None = None
     gCalendarEmail: str|None = None
+    invoiceTemplate: str|None = None
+    vatRate: float|None = None
 
     def toJson(self) -> JsonObject:
         toReturn: JsonObject = dict()
@@ -396,6 +403,10 @@ class Config:
             toReturn["kimaiToken"] = self.kimaiToken
         if self.gCalendarEmail is not None:
             toReturn["gCalendarEmail"] = self.gCalendarEmail
+        if self.invoiceTemplate is not None:
+            toReturn["invoiceTemplate"] = self.invoiceTemplate
+        if self.vatRate is not None:
+            toReturn["vatRate"] = self.vatRate
         return toReturn
 
 
@@ -572,6 +583,201 @@ def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
                         locale.str(durationSum/3600), dataLine, ", ".join(description).replace("\t", " ")))
 
 
+@dataclasses.dataclass
+class InvoiceLine:
+    projectName: str
+    activityName: str
+    begin: datetime.date
+    end: datetime.date
+    rateHour: float
+    durationHour: float = 0.0
+
+    @property
+    def durationDay(self) -> float:
+        return self.durationHour/7.0
+
+    @property
+    def rateDay(self) -> float:
+        return self.rateHour*7.0
+
+    @property
+    def total(self) -> float:
+        return self.rateHour * self.durationHour
+
+
+@dataclasses.dataclass
+class InvoiceHeader:
+    num: int
+    date: datetime.date
+    subtotal: float
+    tax: float
+    vatRate: float
+
+    @property
+    def id(self) -> str:
+        return "F{:%Y%m}{:02}".format(self.date, self.num)
+
+    @property
+    def total(self) -> float:
+        return self.subtotal + self.tax
+
+    @property
+    def vatPercent(self) -> float:
+        return self.vatRate * 100.0
+
+
+class Invoice:
+    def __init__(self, num: int, customer: KimaiCustomerDetails, date: datetime.date, lineByProjectActivity : dict[str, dict[str, InvoiceLine]], vatRate: float):
+        self._num = num
+        self._customer = customer
+        self._date = date
+        self._vatRate = vatRate
+        self._lines: list[InvoiceLine] = []
+        self._subtotal = 0.0
+        self._tax = 0.0
+        for lineByActivity in lineByProjectActivity.values():
+            for line in lineByActivity.values():
+                self._lines.append(line)
+                self._subtotal += line.total
+                self._tax += line.total * vatRate
+        self._lines.sort(key=lambda item : item.begin)
+
+    @property
+    def header(self) -> InvoiceHeader:
+        return InvoiceHeader(self._num, self._date, self._subtotal, self._tax, self._vatRate)
+
+    def generateInvoiceFile(self, templateFilePath: str):
+        templateFile = openpyxl.open(templateFilePath)
+        tempateSheet = typing.cast(openpyxl.worksheet.worksheet.Worksheet, templateFile.active)
+        lineIndex = 0
+        isInvoiceLineCopy = False
+        for rowIndex in range(1, tempateSheet.max_row+1):
+            isRowContainsInvoiceLine = False
+            for columnIndex in range(1, tempateSheet.max_column+1):
+                cell = tempateSheet.cell(rowIndex, columnIndex)
+                if type(cell.value) is str:
+                    result, isInvoiceLine = self._templateReplace(cell.value, lineIndex)
+                    if isInvoiceLine:
+                        isRowContainsInvoiceLine = True
+                        if not isInvoiceLineCopy:
+                            for _ in range(len(self._lines)-1):
+                                self._copyRow(tempateSheet, rowIndex, rowIndex+1)
+                            isInvoiceLineCopy = True
+                    if result != None:
+                        cell.value = result
+            if isRowContainsInvoiceLine:
+                lineIndex += 1
+        templateFile.save("{:%Y-%m}_facture_{}.xlsx".format(self._date, self._customer.name))
+
+    def _copyRow(self, sheet: openpyxl.worksheet.worksheet.Worksheet, rowIndexSrc: int, rowIndexDst: int):
+        sheet.insert_rows(rowIndexDst)
+        if rowIndexDst < rowIndexSrc:
+            rowIndexSrc += 1
+        for columnIndex in range(1, sheet.max_column+1):
+            cellSrc = sheet.cell(rowIndexSrc, columnIndex)
+            cellDst = sheet.cell(rowIndexDst, columnIndex)
+            cellDst.value = cellSrc.value
+            cellDst.font = copy.copy(cellSrc.font) # type: ignore
+            cellDst.alignment = copy.copy(cellSrc.alignment) # type: ignore
+            cellDst.border = copy.copy(cellSrc.border) # type: ignore
+            cellDst.fill = copy.copy(cellSrc.fill) # type: ignore
+            cellDst.number_format = copy.copy(cellSrc.number_format) # type: ignore
+
+    def _templateReplace(self, source: str, lineIndex: int) -> tuple[None|str|int|float, bool]:
+        toReplaceIndexBegin = source.find("${")
+        if toReplaceIndexBegin == -1:
+            return None, False
+        lastCopyIndex = 0
+        result = ""
+        locale.setlocale(locale.LC_ALL, locale.getlocale())
+        dateFormat = locale.nl_langinfo(locale.D_FMT)
+        isLine = False
+        while toReplaceIndexBegin != -1:
+            toReplaceIndexEnd = source.find("}", toReplaceIndexBegin)
+            toReplaceName = source[toReplaceIndexBegin+2:toReplaceIndexEnd].split(".")
+            toReplaceValue = None
+            if toReplaceName[0] == "Customer":
+                toReplaceValue = getattr(self._customer, toReplaceName[1])
+            elif toReplaceName[0] == "Invoice":
+                toReplaceValue = getattr(self.header, toReplaceName[1])
+            elif toReplaceName[0] == "InvoiceLine":
+                toReplaceValue = getattr(self._lines[lineIndex], toReplaceName[1])
+                isLine = True
+            else:
+                print('Template value "{}" not supported'.format(toReplaceName), file=sys.stderr)
+                sys.exit(1)
+            if len(toReplaceName) == 3:
+                if type(toReplaceValue) == datetime.date:
+                    if toReplaceName[2] == "day":
+                        toReplaceValue = toReplaceValue.day
+                    elif toReplaceName[2] == "month":
+                        toReplaceValue = toReplaceValue.month
+                    elif toReplaceName[2] == "year":
+                        toReplaceValue = toReplaceValue.year
+                    else:
+                        print('Template value "{}" not supported for a date'.format(toReplaceName), file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    print('Template value "{}" not supported for {}'.format(toReplaceName, type(toReplaceValue)), file=sys.stderr)
+                    sys.exit(1)
+            if type(toReplaceValue) == datetime.date:
+                toReplaceValue = toReplaceValue.strftime(dateFormat)
+            if toReplaceIndexBegin==0 and toReplaceIndexEnd == len(source)-1:
+                return toReplaceValue, isLine
+            # else
+            result += source[lastCopyIndex:toReplaceIndexBegin]
+            lastCopyIndex = toReplaceIndexEnd+1
+            result += str(toReplaceValue)
+            toReplaceIndexBegin = source.find("${", toReplaceIndexEnd)
+        result += source[lastCopyIndex:]
+        return result, isLine
+
+
+def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
+    if not templateFilePath.endswith(".xlsx"):
+        print("Only support excel xlsx file", file=sys.stderr)
+        sys.exit(1)
+    timeSheets = kimai.getTimesheets(maxItem=100, billable=True, exported=False, active=False)
+    projects = kimai.getProjects()
+    activities = kimai.getActivities()
+    invoiceLineByCustomerProjectActivity: dict[int, dict[str, dict[str, InvoiceLine]]] = dict()
+    for timeSheet in timeSheets.values():
+        # Get time sheet data
+        project = projects.get(timeSheet.project)
+        activity = activities.get(timeSheet.activity)
+        if project.customer not in invoiceLineByCustomerProjectActivity:
+            invoiceLineByCustomerProjectActivity[project.customer] = dict()
+        if project.name not in invoiceLineByCustomerProjectActivity[project.customer]:
+            invoiceLineByCustomerProjectActivity[project.customer][project.name] = dict()
+        if activity.name not in invoiceLineByCustomerProjectActivity[project.customer][project.name]:
+            activityDetails = kimai.getActivity(timeSheet.activity)
+            rates = kimai.getCustomerRates(project.customer)
+            if len(rates.customerRatesById) != 1:
+                print("Too much or none rate for customer {}".format(project.customer), file=sys.stderr)
+                sys.exit(1)
+            rate = next(iter(rates.customerRatesById.values())).rate
+            invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name] \
+                    = InvoiceLine(project.name, activity.name, timeSheet.getBegin().date(),
+                    timeSheet.getEnd().date(), rate, activityDetails.timeBudget/3600.0)
+        else:
+            if timeSheet.getBegin().date() < invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin:
+                invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin = timeSheet.getBegin().date()
+            if timeSheet.getEnd().date() > invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].end:
+                invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].end = timeSheet.getEnd().date()
+        invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].durationHour += timeSheet.duration/3600.0
+        invoiceLine = invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name]
+        if abs(invoiceLine.rateHour * timeSheet.duration/3600.0 - timeSheet.rate) >= 0.01:
+            print("Computed time sheet price not the same as kimai time sheet price: {} * {} = {} != {}"
+                  .format(invoiceLine.rateHour, timeSheet.duration/3600.0, invoiceLine.rateHour * timeSheet.duration/3600.0, timeSheet.rate), file=sys.stderr)
+            sys.exit(1)
+    invoiceNum = 0
+    for customerId, invoiceLineByProjectActivity in invoiceLineByCustomerProjectActivity.items():
+        invoiceNum += 1
+        customer = kimai.getCustomer(customerId)
+        invoice = Invoice(invoiceNum, customer, datetime.date.today(), invoiceLineByProjectActivity, vatRate)
+        invoice.generateInvoiceFile(templateFilePath)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Kimai cli tool")
     groupAction = parser.add_mutually_exclusive_group(required=True)
@@ -599,6 +805,8 @@ if __name__ == '__main__':
     groupAction.add_argument('--cra', type=lambda s: datetime.datetime.strptime(s,
             '%Y-%m-%d'), help="Generate a file in current dir for each customer with one line by "
             "day, project and activity with duration in hour and description")
+    groupAction.add_argument('--invoice', action='store_true',
+            help="Generate an invoice file in current dir for each customer from last invoice no draft")
     parser.add_argument("--kimaiUrl", type=str, help="The Kimai url with protocol and /api "
             "exemple http://nas.local:8001/api (can be saved in config file)")
     parser.add_argument("--kimaiUsername", type=str, help="The Kimai username (can be saved in "
@@ -608,6 +816,9 @@ if __name__ == '__main__':
     parser.add_argument("--gCalendarEmail", type=str, help="The email address of the google "
             "calendar (can be saved in config file)")
     parser.add_argument("--kimaiUserId", type=int, help="The user identifier to set timesheets")
+    parser.add_argument("--invoiceTemplate", type=str, help="The invoice template filepath to "
+            "generate invoice file")
+    parser.add_argument("--vatRate", type=float, help="The VAT rate to generate invoice")
     parser.add_argument("--timeBudget", type=float, help="When use --updateActivity update the time "
             "budget with the given time in hour")
     argcomplete.autocomplete(parser)
@@ -627,6 +838,10 @@ if __name__ == '__main__':
         configData.kimaiToken = args.kimaiToken
     if args.gCalendarEmail:
         configData.gCalendarEmail = args.gCalendarEmail
+    if args.invoiceTemplate:
+        configData.invoiceTemplate = args.invoiceTemplate
+    if args.vatRate:
+        configData.vatRate = args.vatRate
 
     if args.configure:
         with open(configPath, 'w') as configFile:
@@ -691,9 +906,18 @@ if __name__ == '__main__':
 
     if args.toGCalendar:
         if configData.gCalendarEmail is None:
-            print("google calendar email addess not defined", file=sys.stderr)
+            print("Google calendar email addess not defined", file=sys.stderr)
             sys.exit(1)
         kimaiToGCalendar(args.toGCalendar, kimai, configData.gCalendarEmail)
 
     if args.cra:
         generateCraFiles(args.cra, kimai)
+
+    if args.invoice:
+        if configData.invoiceTemplate is None:
+            print("Invoice template file path not defined", file=sys.stderr)
+            sys.exit(1)
+        if configData.vatRate is None:
+            print("Invoice VAT rate not defined", file=sys.stderr)
+            sys.exit(1)
+        generateInvoiceFiles(kimai, configData.invoiceTemplate, configData.vatRate)
