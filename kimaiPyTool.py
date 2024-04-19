@@ -66,65 +66,6 @@ def jsonObject2NamedTuple(cls: type[T], jsonObject: JsonObject) -> T:
     return cls(**d)
 
 
-class Kimai:
-    def __init__(self, url: str, username:str, password: str):
-        self._url = url
-        self._username = username
-        self._password = password
-
-    def _buildheader(self):
-        return {"X-AUTH-USER": self._username, "X-AUTH-TOKEN": self._password}
-
-    def _runRequest(self, method:str, urlSufix: str, params:RequestParam|None={}, data: JsonObject|None=None):
-        response = requests.request(method, self._url + "/" + urlSufix, params=params, headers=self._buildheader(), data=data)
-        if response.status_code != 200:
-            print('For request "{}" get {}'.format(response.url, response.json()), file=sys.stderr)
-            sys.exit(1)
-        if response.headers.get("X-Total-Pages", "1") != "1":
-            print('For request "{}" get too much result: {}'.format(response.url, response.headers["X-Total-Count"]), file=sys.stderr)
-            sys.exit(1)
-        return response.json()
-
-    def getCustomers(self) -> JsonList:
-        return self._runRequest("get", "customers")
-
-    def getProjects(self) -> JsonList:
-        return self._runRequest("get", "projects")
-
-    def getActivities(self) -> JsonList:
-        return self._runRequest("get", "activities")
-
-    def getActivity(self, id: int) -> JsonObject:
-        return self._runRequest("get", "activities/{}".format(id))
-
-    def updateActivity(self, id: int, data: JsonObject) -> JsonObject:
-        return self._runRequest("patch", "activities/{}".format(id), data=data)
-
-    def getTimesheets(self, begin:str|None=None, maxItem: int|None=None) -> JsonList:
-        params:RequestParam = RequestParam()
-        if begin is not None:
-            params["begin"] = begin
-        if maxItem is not None:
-            params["size"] = str(maxItem)
-        return self._runRequest("get", "timesheets", params)
-
-    def addTimesheet(self, userId: int, projectId: int, activityId: int, begin: str, end: str,
-            description: str) -> JsonObject:
-        data = JsonObject()
-        data["user"] = userId
-        data["project"] = projectId
-        data["activity"] = activityId
-        data["begin"] = begin
-        data["end"] = end
-        data["description"] = description
-        return self._runRequest("post", "timesheets", data=data)
-
-    def addTimesheetTag(self, timeSheetId: int, tags: list[str]) -> JsonObject:
-        data = JsonObject()
-        data["tags"] = typing.cast(JsonList, tags)
-        return self._runRequest("patch", "timesheets/{}".format(timeSheetId), data=data)
-
-
 class KimaiCustomer(typing.NamedTuple):
     id: int
     name: str
@@ -133,6 +74,29 @@ class KimaiCustomer(typing.NamedTuple):
     visible: bool
     billable: bool
     currency: str
+
+
+class KimaiCustomerDetails(typing.NamedTuple):
+    id: int
+    name: str
+    number: str
+    comment: str
+    visible: bool
+    billable: bool
+    company: str
+    vatId: None|str
+    contact: None|str
+    address: None|str
+    country: str
+    currency: str
+    phone: None|str
+    fax: None|str
+    mobile: None|str
+    email: None|str
+    homepage: None|str
+    timezone: None|str
+    budget: float
+    timeBudget: int
 
 
 class KimaiCustomers:
@@ -148,11 +112,41 @@ class KimaiCustomers:
             self._customersById[customer.id] = customer
             self._idsByName[customer.name] = customer.id
 
+    @property
+    def customersById(self) -> dict[int, KimaiCustomer]:
+        return self._customersById
+
     def get(self, id: int) -> KimaiCustomer:
         return self._customersById[id]
 
     def getIdByName(self, name: str) -> int:
         return self._idsByName[name]
+
+
+class KimaiCustomerRate(typing.NamedTuple):
+    id: int
+    rate: float
+    internalRate: float|None
+    isFixed: bool
+
+
+class KimaiCustomerRates:
+    def __init__(self, jsonList: JsonList):
+        self._customerRatesById: dict[int, KimaiCustomerRate] = dict()
+        for jsonValue in jsonList:
+            if type(jsonValue) is not typing.get_origin(JsonObject):
+                raise TypeError('Unexpected type for {}, expected {}, get {}'
+                        .format(jsonValue, JsonObject, type(jsonValue)))
+            jsonObject = typing.cast(JsonObject, jsonValue)
+            customerRate = jsonObject2NamedTuple(KimaiCustomerRate, jsonObject)
+            self._customerRatesById[customerRate.id] = customerRate
+
+    @property
+    def customerRatesById(self) -> dict[int, KimaiCustomerRate]:
+        return self._customerRatesById
+
+    def get(self, id: int) -> KimaiCustomerRate:
+        return self._customerRatesById[id]
 
 
 class KimaiProject(typing.NamedTuple):
@@ -186,6 +180,10 @@ class KimaiProjects:
                 self._idsByCustomerId[project.customer] = list()
             self._idsByCustomerId[project.customer].append(project.id)
 
+    @property
+    def projectsById(self) -> dict[int, KimaiProject]:
+        return self._projectsById
+
     def get(self, id: int) -> KimaiProject:
         return self._projectsById[id]
 
@@ -204,6 +202,18 @@ class KimaiActivity(typing.NamedTuple):
     comment: str|None
     visible: bool
     billable: bool
+
+
+class KimaiActivityDetails(typing.NamedTuple):
+    parentTitle: str
+    project: int
+    id: int
+    name: str
+    comment: str|None
+    visible: bool
+    billable: bool
+    budget: float
+    timeBudget: int
 
 
 class KimaiActivities:
@@ -225,6 +235,10 @@ class KimaiActivities:
                 self._idsByProjectId[activity.project] = list()
             self._idsByProjectId[activity.project].append(activity.id)
 
+    @property
+    def activitiesById(self) -> dict[int, KimaiActivity]:
+        return self._activitiesById
+
     def get(self, id: int) -> KimaiActivity:
         return self._activitiesById[id]
 
@@ -244,9 +258,17 @@ class KimaiTimeSheet(typing.NamedTuple):
     end: str
     duration: int
     description: str
+    rate: float
+    internalRate: float
     exported: bool
     billable: bool
     tags: list[str]
+
+    def getBegin(self) -> datetime.datetime:
+        return datetime.datetime.fromisoformat(self.begin)
+
+    def getEnd(self) -> datetime.datetime:
+        return datetime.datetime.fromisoformat(self.end)
 
 
 class KimaiTimeSheets:
@@ -260,11 +282,94 @@ class KimaiTimeSheets:
             timeSheet = jsonObject2NamedTuple(KimaiTimeSheet, jsonObject)
             self._timeSheetsById[timeSheet.id] = timeSheet
 
+    @property
+    def timesheetsById(self) -> dict[int, KimaiTimeSheet]:
+        return self._timeSheetsById
+
     def get(self, id: int) -> KimaiTimeSheet:
         return self._timeSheetsById[id]
 
     def values(self):
         return self._timeSheetsById.values()
+
+
+class Kimai:
+    def __init__(self, url: str, username:str, password: str):
+        self._url = url
+        self._username = username
+        self._password = password
+
+    def _buildheader(self):
+        return {"X-AUTH-USER": self._username, "X-AUTH-TOKEN": self._password}
+
+    def _runRequest(self, method:str, urlSufix: str, params:RequestParam|None={}, data: JsonObject|None=None):
+        response = requests.request(method, self._url + "/" + urlSufix, params=params, headers=self._buildheader(), data=data)
+        if response.status_code != 200:
+            print('For request "{}" get {}'.format(response.url, response.json()), file=sys.stderr)
+            sys.exit(1)
+        if response.headers.get("X-Total-Pages", "1") != "1":
+            print('For request "{}" get too much result: {}'.format(response.url, response.headers["X-Total-Count"]), file=sys.stderr)
+            sys.exit(1)
+        return response.json()
+
+    def getCustomers(self) -> KimaiCustomers:
+        return KimaiCustomers(self._runRequest("get", "customers"))
+
+    def getCustomer(self, id: int) -> KimaiCustomerDetails:
+        customerJson = self._runRequest("get", "customers/{}".format(id))
+        return jsonObject2NamedTuple(KimaiCustomerDetails, customerJson)
+
+    def getCustomerRates(self, id: int) -> KimaiCustomerRates:
+        return KimaiCustomerRates(self._runRequest("get", "customers/{}/rates".format(id)))
+
+    def getProjects(self) -> KimaiProjects:
+        projectsJon = self._runRequest("get", "projects")
+        return KimaiProjects(projectsJon)
+
+    def getActivities(self) -> KimaiActivities:
+        activitiesJson = self._runRequest("get", "activities")
+        return KimaiActivities(activitiesJson)
+
+    def getActivity(self, id: int) -> KimaiActivityDetails:
+        activityJson = self._runRequest("get", "activities/{}".format(id))
+        return jsonObject2NamedTuple(KimaiActivityDetails, activityJson)
+
+    def updateActivity(self, id: int, data: JsonObject) -> JsonObject:
+        return self._runRequest("patch", "activities/{}".format(id), data=data)
+
+    def getTimesheets(self, begin:str|None=None, maxItem: int|None=None, billable: bool|None=None,
+                exported: bool|None=None, active: bool|None=None, tags: list[str]|None=None) -> KimaiTimeSheets:
+        params:RequestParam = RequestParam()
+        if begin is not None:
+            params["begin"] = begin
+        if maxItem is not None:
+            params["size"] = str(maxItem)
+        if billable is not None:
+            params["billable"] = "1" if billable else "0"
+        if exported is not None:
+            params["exported"] = "1" if exported else "0"
+        if active is not None:
+            params["active"] = "1" if active else "0"
+        if tags is not None:
+            params["tags[]"] = tags # type: ignore
+        timesheetsJson = self._runRequest("get", "timesheets", params)
+        return KimaiTimeSheets(timesheetsJson)
+
+    def addTimesheet(self, userId: int, projectId: int, activityId: int, begin: str, end: str,
+            description: str) -> JsonObject:
+        data = JsonObject()
+        data["user"] = userId
+        data["project"] = projectId
+        data["activity"] = activityId
+        data["begin"] = begin
+        data["end"] = end
+        data["description"] = description
+        return self._runRequest("post", "timesheets", data=data)
+
+    def addTimesheetTag(self, timeSheetId: int, tags: list[str]) -> JsonObject:
+        data = JsonObject()
+        data["tags"] = typing.cast(JsonList, tags)
+        return self._runRequest("patch", "timesheets/{}".format(timeSheetId), data=data)
 
 
 def getConfigPath(fileName: str) -> str:
@@ -346,8 +451,8 @@ def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, serv
 def importEventFile(timesheetsFilePath: str, kimaiUserId: int, kimai: Kimai):
         with open(timesheetsFilePath, 'r') as eventsFile:
             eventsData = json.loads(eventsFile.read())
-        projects = KimaiProjects(kimai.getProjects())
-        activities = KimaiActivities(kimai.getActivities())
+        projects = kimai.getProjects()
+        activities = kimai.getActivities()
         for eventData in eventsData:
             projectName = eventData["projectName"]
             projectId = projects.getIdByName(projectName)
@@ -375,11 +480,11 @@ class CraItem:
 
 def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str):
     beginStr = datetime.datetime.isoformat(begin)
-    timeSheets = KimaiTimeSheets(kimai.getTimesheets(begin=beginStr))
+    timeSheets = kimai.getTimesheets(begin=beginStr)
     googleCalendarService = None
-    customers = KimaiCustomers(kimai.getCustomers())
-    projects = KimaiProjects(kimai.getProjects())
-    activities = KimaiActivities(kimai.getActivities())
+    customers = kimai.getCustomers()
+    projects = kimai.getProjects()
+    activities = kimai.getActivities()
     for timeSheet in timeSheets.values():
         if KIMAI_TAG_FOR_GOOGLE_CALENDAR not in timeSheet.tags:
             if googleCalendarService is None:
@@ -405,10 +510,10 @@ def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str
 def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
     beginStr = datetime.datetime.isoformat(begin)
     end = datetime.date.today()
-    timeSheets = KimaiTimeSheets(kimai.getTimesheets(begin=beginStr, maxItem=100))
-    customers = KimaiCustomers(kimai.getCustomers())
-    projects = KimaiProjects(kimai.getProjects())
-    activities = KimaiActivities(kimai.getActivities())
+    timeSheets = kimai.getTimesheets(begin=beginStr, maxItem=100)
+    customers = kimai.getCustomers()
+    projects = kimai.getProjects()
+    activities = kimai.getActivities()
     craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] = dict()
     locale.setlocale(locale.LC_ALL, locale.getlocale())
     dateFormat = locale.nl_langinfo(locale.D_FMT)
@@ -473,6 +578,10 @@ if __name__ == '__main__':
     groupAction.add_argument('--configure', action='store_true', help="Save params in config file")
     groupAction.add_argument('--getCustomers', action='store_true',
             help="Display a json list of customers")
+    groupAction.add_argument('--getCustomer', type=int,
+            help="Display a json object of the given customer")
+    groupAction.add_argument('--getCustomerRate', type=int,
+            help="Display a json list of rate associate with the given customer")
     groupAction.add_argument('--getProjects', action='store_true',
             help="Display a json list of projects")
     groupAction.add_argument('--getActivities', action='store_true',
@@ -538,16 +647,26 @@ if __name__ == '__main__':
     kimai = Kimai(configData.kimaiUrl, configData.kimaiUsername, configData.kimaiToken)
 
     if args.getCustomers:
-        json.dump(kimai.getCustomers(), sys.stdout, indent=4)
+        for customer in kimai.getCustomers().customersById.values():
+            print(customer)
+
+    if args.getCustomer:
+        print(kimai.getCustomer(args.getCustomer))
+
+    if args.getCustomerRate:
+        for customerRate in kimai.getCustomerRates(args.getCustomerRate).customerRatesById.values():
+            print(customerRate)
 
     if args.getProjects:
-        json.dump(kimai.getProjects(), sys.stdout, indent=4)
+        for project in kimai.getProjects().projectsById.values():
+            print(project)
 
     if args.getActivities:
-        json.dump(kimai.getActivities(), sys.stdout, indent=4)
+        for activity in kimai.getActivities().activitiesById.values():
+            print(activity)
 
     if args.getActivity:
-        json.dump(kimai.getActivity(args.getActivity), sys.stdout, indent=4)
+        print(kimai.getActivity(args.getActivity))
 
     if args.updateActivity:
         data = JsonObject()
@@ -560,7 +679,8 @@ if __name__ == '__main__':
         json.dump(kimai.updateActivity(args.updateActivity, data), sys.stdout, indent=4)
 
     if args.getTimesheets:
-        json.dump(kimai.getTimesheets(), sys.stdout, indent=4)
+        for timesheet in kimai.getTimesheets().timesheetsById.values():
+            print(timesheet)
 
     if args.setTimesheets:
         if not args.kimaiUserId:
