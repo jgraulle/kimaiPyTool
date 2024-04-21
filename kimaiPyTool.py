@@ -19,6 +19,7 @@ import dataclasses
 import openpyxl
 import copy
 import enum
+import math
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -39,12 +40,12 @@ GOOGLE_TOKEN_FILE = 'google_token.json'
 
 
 T = typing.TypeVar("T")
-def jsonObject2NamedTuple(cls: type[T], jsonObject: JsonObject) -> T:
+def jsonObject2Class(cls: type[T], jsonObject: JsonObject) -> T:
     if type(jsonObject) is not dict:
         raise TypeError('Unexpected type for {}, expected {}, get {}'
                 .format(jsonObject, dict, type(jsonObject)))
     d:dict[str, typing.Any] = dict()
-    for fieldName, fieldType in cls.__annotations__.items():
+    for fieldName, fieldType in typing.get_type_hints(cls).items():
         if fieldName not in jsonObject:
             if (typing.get_origin(fieldType) in [typing.Union, types.UnionType]
                     and isinstance(None, typing.get_args(fieldType))):
@@ -72,43 +73,20 @@ def jsonObject2NamedTuple(cls: type[T], jsonObject: JsonObject) -> T:
     return cls(**d)
 
 
-class KimaiCustomer(typing.NamedTuple):
-    id: int
-    name: str
-    number: str
-    comment: str
-    visible: bool
-    billable: bool
-    currency: str
-
-
 class InvoiceUnit(enum.Enum):
     HOUR = enum.auto()
     DAY = enum.auto()
 
 
 @dataclasses.dataclass
-class KimaiCustomerDetails():
+class KimaiCustomer():
     id: int
     name: str
     number: str
     comment: None|str
     visible: bool
     billable: bool
-    company: str
-    vatId: None|str
-    contact: None|str
-    address: None|str
-    country: str
     currency: str
-    phone: None|str
-    fax: None|str
-    mobile: None|str
-    email: None|str
-    homepage: None|str
-    timezone: None|str
-    budget: float
-    timeBudget: int
 
     @property
     def invoiceUnit(self) -> None|InvoiceUnit:
@@ -128,6 +106,61 @@ class KimaiCustomerDetails():
             return dataJson["invoiceUnitTranslated"]
         return None
 
+    @property
+    def invoiceRemainingHours(self) -> None|float:
+        if self.comment is None:
+            return None
+        dataJson = json.loads(self.comment)
+        if "invoiceRemainingHours" in dataJson:
+            return dataJson["invoiceRemainingHours"]
+        return None
+
+    @invoiceRemainingHours.setter
+    def invoiceRemainingHours(self, invoiceRemainingHours: float):
+        dataJson = JsonObject()
+        if self.comment is not None:
+            dataJson = json.loads(self.comment)
+        dataJson["invoiceRemainingHours"] = invoiceRemainingHours
+        self.comment = json.dumps(dataJson)
+
+    @property
+    def invoiceRemainingHoursNext(self) -> None|float:
+        if self.comment is None:
+            return None
+        dataJson = json.loads(self.comment)
+        if "invoiceRemainingHoursNext" in dataJson:
+            return dataJson["invoiceRemainingHoursNext"]
+        return None
+
+    @invoiceRemainingHoursNext.setter
+    def invoiceRemainingHoursNext(self, invoiceRemainingHoursNext: float|None):
+        dataJson = JsonObject()
+        if self.comment is not None:
+            dataJson = json.loads(self.comment)
+        if invoiceRemainingHoursNext is None:
+            if "invoiceRemainingHoursNext" in dataJson:
+                del dataJson["invoiceRemainingHoursNext"]
+        else:
+            dataJson["invoiceRemainingHoursNext"] = invoiceRemainingHoursNext
+        self.comment = json.dumps(dataJson)
+
+
+@dataclasses.dataclass
+class KimaiCustomerDetails(KimaiCustomer):
+    company: str
+    vatId: None|str
+    contact: None|str
+    address: None|str
+    country: str
+    phone: None|str
+    fax: None|str
+    mobile: None|str
+    email: None|str
+    homepage: None|str
+    timezone: None|str
+    budget: float
+    timeBudget: int
+
 
 class KimaiCustomers:
     def __init__(self, jsonList: JsonList):
@@ -138,7 +171,7 @@ class KimaiCustomers:
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
                         .format(jsonValue, JsonObject, type(jsonValue)))
             jsonObject = typing.cast(JsonObject, jsonValue)
-            customer = jsonObject2NamedTuple(KimaiCustomer, jsonObject)
+            customer = jsonObject2Class(KimaiCustomer, jsonObject)
             self._customersById[customer.id] = customer
             self._idsByName[customer.name] = customer.id
 
@@ -153,7 +186,8 @@ class KimaiCustomers:
         return self._idsByName[name]
 
 
-class KimaiCustomerRate(typing.NamedTuple):
+@dataclasses.dataclass
+class KimaiCustomerRate:
     id: int
     rate: float
     internalRate: float|None
@@ -168,7 +202,7 @@ class KimaiCustomerRates:
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
                         .format(jsonValue, JsonObject, type(jsonValue)))
             jsonObject = typing.cast(JsonObject, jsonValue)
-            customerRate = jsonObject2NamedTuple(KimaiCustomerRate, jsonObject)
+            customerRate = jsonObject2Class(KimaiCustomerRate, jsonObject)
             self._customerRatesById[customerRate.id] = customerRate
 
     @property
@@ -179,7 +213,8 @@ class KimaiCustomerRates:
         return self._customerRatesById[id]
 
 
-class KimaiProject(typing.NamedTuple):
+@dataclasses.dataclass
+class KimaiProject():
     parentTitle: str
     customer: int
     id: int
@@ -201,7 +236,7 @@ class KimaiProjects:
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
                         .format(jsonValue, JsonObject, type(jsonValue)))
             jsonObject = typing.cast(JsonObject, jsonValue)
-            project = jsonObject2NamedTuple(KimaiProject, jsonObject)
+            project = jsonObject2Class(KimaiProject, jsonObject)
             self._projectsById[project.id] = project
             if project.name in self._idsByName:
                 raise ValueError('The project name "{}" already exist'.format(project.name))
@@ -224,7 +259,8 @@ class KimaiProjects:
         return self._idsByCustomerId[customerId]
 
 
-class KimaiActivity(typing.NamedTuple):
+@dataclasses.dataclass
+class KimaiActivity():
     parentTitle: str
     project: int
     id: int
@@ -234,14 +270,8 @@ class KimaiActivity(typing.NamedTuple):
     billable: bool
 
 
-class KimaiActivityDetails(typing.NamedTuple):
-    parentTitle: str
-    project: int
-    id: int
-    name: str
-    comment: str|None
-    visible: bool
-    billable: bool
+@dataclasses.dataclass
+class KimaiActivityDetails(KimaiActivity):
     budget: float
     timeBudget: int
 
@@ -256,7 +286,7 @@ class KimaiActivities:
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
                         .format(jsonValue, JsonObject, type(jsonValue)))
             jsonObject = typing.cast(JsonObject, jsonValue)
-            activity = jsonObject2NamedTuple(KimaiActivity, jsonObject)
+            activity = jsonObject2Class(KimaiActivity, jsonObject)
             self._activitiesById[activity.id] = activity
             if activity.name in self._idsByName:
                 raise ValueError('The activity name "{}" already exist'.format(activity.name))
@@ -279,7 +309,8 @@ class KimaiActivities:
         return self._idsByProjectId[projectId]
 
 
-class KimaiTimeSheet(typing.NamedTuple):
+@dataclasses.dataclass
+class KimaiTimeSheet():
     activity: int
     project: int
     user: int
@@ -309,7 +340,7 @@ class KimaiTimeSheets:
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
                         .format(jsonValue, JsonObject, type(jsonValue)))
             jsonObject = typing.cast(JsonObject, jsonValue)
-            timeSheet = jsonObject2NamedTuple(KimaiTimeSheet, jsonObject)
+            timeSheet = jsonObject2Class(KimaiTimeSheet, jsonObject)
             self._timeSheetsById[timeSheet.id] = timeSheet
 
     @property
@@ -347,7 +378,11 @@ class Kimai:
 
     def getCustomer(self, id: int) -> KimaiCustomerDetails:
         customerJson = self._runRequest("get", "customers/{}".format(id))
-        return jsonObject2NamedTuple(KimaiCustomerDetails, customerJson)
+        return jsonObject2Class(KimaiCustomerDetails, customerJson)
+
+    def updateCustomer(self, id: int, data: JsonObject) -> KimaiCustomerDetails:
+        customerJson = self._runRequest("patch", "customers/{}".format(id), data=data)
+        return jsonObject2Class(KimaiCustomerDetails, customerJson)
 
     def getCustomerRates(self, id: int) -> KimaiCustomerRates:
         return KimaiCustomerRates(self._runRequest("get", "customers/{}/rates".format(id)))
@@ -362,10 +397,11 @@ class Kimai:
 
     def getActivity(self, id: int) -> KimaiActivityDetails:
         activityJson = self._runRequest("get", "activities/{}".format(id))
-        return jsonObject2NamedTuple(KimaiActivityDetails, activityJson)
+        return jsonObject2Class(KimaiActivityDetails, activityJson)
 
-    def updateActivity(self, id: int, data: JsonObject) -> JsonObject:
-        return self._runRequest("patch", "activities/{}".format(id), data=data)
+    def updateActivity(self, id: int, data: JsonObject) -> KimaiActivityDetails:
+        customerJson = self._runRequest("patch", "activities/{}".format(id), data=data)
+        return jsonObject2Class(KimaiActivityDetails, customerJson)
 
     def getTimesheets(self, begin:str|None=None, maxItem: int|None=None, billable: bool|None=None,
                 exported: bool|None=None, active: bool|None=None, tags: list[str]|None=None) -> KimaiTimeSheets:
@@ -450,7 +486,8 @@ def googleApiGetCredentials(secretFilePath: str, tokenFilePath: str):
     return credentials
 
 
-class GCalendarEvent(typing.NamedTuple):
+@dataclasses.dataclass
+class GCalendarEvent():
     summary: str
     start: str
     end: str
@@ -616,6 +653,7 @@ class InvoiceLine:
     end: datetime.date
     rateHour: float
     durationHour: float = 0.0
+    durationHourFloor: float = 0.0
     unit: InvoiceUnit|None = None
 
     @property
@@ -639,6 +677,10 @@ class InvoiceLine:
         return self.durationHour / self.unitRate
 
     @property
+    def durationFloor(self) -> float:
+        return self.durationHourFloor / self.unitRate
+
+    @property
     def rateDay(self) -> float:
         return self.rateHour * 7.0
 
@@ -650,13 +692,22 @@ class InvoiceLine:
     def total(self) -> float:
         return self.rateHour * self.durationHour
 
+    @property
+    def totalFloor(self) -> float:
+        return self.rateHour * self.durationHourFloor
+
+    def updateDurationFloor(self, value: float):
+        duration = math.floor(self.duration / value) * value
+        diffHour = (self.duration - duration) * self.unitRate
+        self.durationHourFloor = self.durationHour - diffHour
+
 
 @dataclasses.dataclass
 class InvoiceHeader:
     num: int
     date: datetime.date
     subtotal: float
-    tax: float
+    subtotalFloor: float
     vatRate: float
 
     @property
@@ -664,8 +715,20 @@ class InvoiceHeader:
         return "F{:%Y%m}{:02}".format(self.date, self.num)
 
     @property
+    def tax(self) -> float:
+        return self.subtotal * self.vatRate
+
+    @property
+    def taxFloor(self) -> float:
+        return self.subtotalFloor * self.vatRate
+
+    @property
     def total(self) -> float:
-        return self.subtotal + self.tax
+        return self.subtotal + self.taxFloor
+
+    @property
+    def totalFloor(self) -> float:
+        return self.subtotalFloor + self.taxFloor
 
     @property
     def vatPercent(self) -> float:
@@ -673,6 +736,8 @@ class InvoiceHeader:
 
 
 class Invoice:
+    REMAINING_FLOOR = 0.5
+
     def __init__(self, num: int, customer: KimaiCustomerDetails, date: datetime.date, lineByProjectActivity : dict[str, dict[str, InvoiceLine]], vatRate: float):
         self._num = num
         self._customer = customer
@@ -680,18 +745,26 @@ class Invoice:
         self._vatRate = vatRate
         self._lines: list[InvoiceLine] = []
         self._subtotal = 0.0
-        self._tax = 0.0
+        self._subtotalFloor = 0.0
+        self._remainingHour = 0.0 if customer.invoiceRemainingHours is None else customer.invoiceRemainingHours
         for lineByActivity in lineByProjectActivity.values():
             for line in lineByActivity.values():
                 line.unit = self._customer.invoiceUnit
+                line.updateDurationFloor(Invoice.REMAINING_FLOOR)
+                self._remainingHour += line.durationHour - line.durationHourFloor
+                REMAINING_FLOOR_HOUR = Invoice.REMAINING_FLOOR * line.unitRate
+                if self._remainingHour > REMAINING_FLOOR_HOUR:
+                    self._remainingHour -= REMAINING_FLOOR_HOUR
+                    line.durationHourFloor += REMAINING_FLOOR_HOUR
                 self._lines.append(line)
                 self._subtotal += line.total
-                self._tax += line.total * vatRate
+                self._subtotalFloor += line.totalFloor
+        self._remainingHour = round(self._remainingHour, 2)
         self._lines.sort(key=lambda item : item.begin)
 
     @property
     def header(self) -> InvoiceHeader:
-        return InvoiceHeader(self._num, self._date, self._subtotal, self._tax, self._vatRate)
+        return InvoiceHeader(self._num, self._date, self._subtotal, self._subtotalFloor, self._vatRate)
 
     def generateInvoiceFile(self, templateFilePath: str):
         templateFile = openpyxl.open(templateFilePath)
@@ -715,6 +788,15 @@ class Invoice:
             if isRowContainsInvoiceLine:
                 lineIndex += 1
         templateFile.save("{:%Y-%m}_facture_{}.xlsx".format(self._date, self._customer.name))
+        if self._customer.invoiceRemainingHoursNext is not None:
+            print('The customer {} already have invoice remaining hours next with value {} the new '
+                    'invoice remaining hours next {} is not saved'.format(self._customer.name,
+                    self._customer.invoiceRemainingHoursNext, self._remainingHour), file=sys.stderr)
+        else:
+            self._customer.invoiceRemainingHoursNext = self._remainingHour
+            data = JsonObject()
+            data["comment"] = self._customer.comment
+            kimai.updateCustomer(self._customer.id, data)
 
     def _copyRow(self, sheet: openpyxl.worksheet.worksheet.Worksheet, rowIndexSrc: int, rowIndexDst: int):
         sheet.insert_rows(rowIndexDst)
@@ -832,6 +914,8 @@ if __name__ == '__main__':
             help="Display a json list of customers")
     groupAction.add_argument('--getCustomer', type=int,
             help="Display a json object of the given customer")
+    groupAction.add_argument('--updateCustomer', type=int,
+            help="Update the given customer")
     groupAction.add_argument('--getCustomerRate', type=int,
             help="Display a json list of rate associate with the given customer")
     groupAction.add_argument('--getProjects', action='store_true',
@@ -852,7 +936,11 @@ if __name__ == '__main__':
             '%Y-%m-%d'), help="Generate a file in current dir for each customer with one line by "
             "day, project and activity with duration in hour and description")
     groupAction.add_argument('--invoice', action='store_true',
-            help="Generate an invoice file in current dir for each customer from last invoice no draft")
+            help="Generate an invoice file in current dir for each customer using remaining hours")
+    groupAction.add_argument('--invoiceRemainingHoursNextCancel', action='store_true',
+            help="Delete all customer invoice remaining hours next")
+    groupAction.add_argument('--invoiceRemainingHoursNextSubmit', action='store_true',
+            help="Delete all customer invoice remaining hours next")
     parser.add_argument("--kimaiUrl", type=str, help="The Kimai url with protocol and /api "
             "exemple http://nas.local:8001/api (can be saved in config file)")
     parser.add_argument("--kimaiUsername", type=str, help="The Kimai username (can be saved in "
@@ -867,6 +955,8 @@ if __name__ == '__main__':
     parser.add_argument("--vatRate", type=float, help="The VAT rate to generate invoice")
     parser.add_argument("--timeBudget", type=float, help="When use --updateActivity update the time "
             "budget with the given time in hour")
+    parser.add_argument("--invoiceRemainingHours", type=float, help="When use --updateCustomer "
+            "update the invoice remaining hours with the given float")
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
@@ -875,7 +965,7 @@ if __name__ == '__main__':
     if os.path.exists(configPath):
         with open(configPath, 'r') as configFile:
             configJson = json.loads(configFile.read())
-            configData = jsonObject2NamedTuple(Config, configJson)
+            configData = jsonObject2Class(Config, configJson)
     if args.kimaiUrl:
         configData.kimaiUrl = args.kimaiUrl
     if args.kimaiUsername:
@@ -914,6 +1004,18 @@ if __name__ == '__main__':
     if args.getCustomer:
         print(kimai.getCustomer(args.getCustomer))
 
+    if args.updateCustomer:
+        data = JsonObject()
+        if args.invoiceRemainingHours:
+            customer = kimai.getCustomer(args.updateCustomer)
+            customer.invoiceRemainingHours = args.invoiceRemainingHours
+            data["comment"] = customer.comment
+        if len(data)==0:
+            print("You must use at least one argument associate with the command updateCustomer",
+                    file=sys.stderr)
+            sys.exit(1)
+        print(kimai.updateCustomer(args.updateCustomer, data))
+
     if args.getCustomerRate:
         for customerRate in kimai.getCustomerRates(args.getCustomerRate).customerRatesById.values():
             print(customerRate)
@@ -937,7 +1039,7 @@ if __name__ == '__main__':
             print("You must use at least one argument associate with the command updateActivity",
                     file=sys.stderr)
             sys.exit(1)
-        json.dump(kimai.updateActivity(args.updateActivity, data), sys.stdout, indent=4)
+        print(kimai.updateActivity(args.updateActivity, data))
 
     if args.getTimesheets:
         for timesheet in kimai.getTimesheets().timesheetsById.values():
@@ -967,3 +1069,22 @@ if __name__ == '__main__':
             print("Invoice VAT rate not defined", file=sys.stderr)
             sys.exit(1)
         generateInvoiceFiles(kimai, configData.invoiceTemplate, configData.vatRate)
+
+    if args.invoiceRemainingHoursNextCancel:
+        customers = kimai.getCustomers()
+        for customer in customers.customersById.values():
+            if customer.invoiceRemainingHoursNext is not None:
+                customer.invoiceRemainingHoursNext = None
+                data = JsonObject()
+                data["comment"] = customer.comment
+                print(kimai.updateCustomer(customer.id, data))
+
+    if args.invoiceRemainingHoursNextSubmit:
+        customers = kimai.getCustomers()
+        for customer in customers.customersById.values():
+            if customer.invoiceRemainingHoursNext is not None:
+                customer.invoiceRemainingHours = customer.invoiceRemainingHoursNext
+                customer.invoiceRemainingHoursNext = None
+                data = JsonObject()
+                data["comment"] = customer.comment
+                print(kimai.updateCustomer(customer.id, data))
