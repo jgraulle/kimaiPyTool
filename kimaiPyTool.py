@@ -18,6 +18,7 @@ import locale
 import dataclasses
 import openpyxl
 import copy
+import enum
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -81,11 +82,17 @@ class KimaiCustomer(typing.NamedTuple):
     currency: str
 
 
-class KimaiCustomerDetails(typing.NamedTuple):
+class InvoiceUnit(enum.Enum):
+    HOUR = enum.auto()
+    DAY = enum.auto()
+
+
+@dataclasses.dataclass
+class KimaiCustomerDetails():
     id: int
     name: str
     number: str
-    comment: str
+    comment: None|str
     visible: bool
     billable: bool
     company: str
@@ -102,6 +109,24 @@ class KimaiCustomerDetails(typing.NamedTuple):
     timezone: None|str
     budget: float
     timeBudget: int
+
+    @property
+    def invoiceUnit(self) -> None|InvoiceUnit:
+        if self.comment is None:
+            return None
+        dataJson = json.loads(self.comment)
+        if "invoiceUnit" in dataJson:
+            return InvoiceUnit[dataJson["invoiceUnit"]]
+        return None
+
+    @property
+    def invoiceUnitTranslated(self) -> None|str:
+        if self.comment is None:
+            return None
+        dataJson = json.loads(self.comment)
+        if "invoiceUnitTranslated" in dataJson:
+            return dataJson["invoiceUnitTranslated"]
+        return None
 
 
 class KimaiCustomers:
@@ -591,14 +616,35 @@ class InvoiceLine:
     end: datetime.date
     rateHour: float
     durationHour: float = 0.0
+    unit: InvoiceUnit|None = None
+
+    @property
+    def unitRate(self) -> float:
+        if self.unit is None:
+            print('Invoice unit not define', file=sys.stderr)
+            sys.exit(1)
+        if self.unit == InvoiceUnit.DAY:
+            return 7.0
+        elif self.unit == InvoiceUnit.HOUR:
+            return 1.0
+        else:
+            raise NotImplemented("conversion from unit {} not implemented".format(self.unit))
 
     @property
     def durationDay(self) -> float:
-        return self.durationHour/7.0
+        return self.durationHour / 7.0
+
+    @property
+    def duration(self) -> float:
+        return self.durationHour / self.unitRate
 
     @property
     def rateDay(self) -> float:
-        return self.rateHour*7.0
+        return self.rateHour * 7.0
+
+    @property
+    def rate(self) -> float:
+        return self.rateHour * self.unitRate
 
     @property
     def total(self) -> float:
@@ -637,6 +683,7 @@ class Invoice:
         self._tax = 0.0
         for lineByActivity in lineByProjectActivity.values():
             for line in lineByActivity.values():
+                line.unit = self._customer.invoiceUnit
                 self._lines.append(line)
                 self._subtotal += line.total
                 self._tax += line.total * vatRate
@@ -750,7 +797,6 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
         if project.name not in invoiceLineByCustomerProjectActivity[project.customer]:
             invoiceLineByCustomerProjectActivity[project.customer][project.name] = dict()
         if activity.name not in invoiceLineByCustomerProjectActivity[project.customer][project.name]:
-            activityDetails = kimai.getActivity(timeSheet.activity)
             rates = kimai.getCustomerRates(project.customer)
             if len(rates.customerRatesById) != 1:
                 print("Too much or none rate for customer {}".format(project.customer), file=sys.stderr)
@@ -758,7 +804,7 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
             rate = next(iter(rates.customerRatesById.values())).rate
             invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name] \
                     = InvoiceLine(project.name, activity.name, timeSheet.getBegin().date(),
-                    timeSheet.getEnd().date(), rate, activityDetails.timeBudget/3600.0)
+                    timeSheet.getEnd().date(), rate)
         else:
             if timeSheet.getBegin().date() < invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin:
                 invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin = timeSheet.getBegin().date()
