@@ -34,6 +34,7 @@ RequestParam = dict[str, str]
 
 APP_NAME = "kimaiPyTool"
 KIMAI_TAG_FOR_GOOGLE_CALENDAR = "gcalendar"
+KIMAI_TAG_FOR_INVOICE_IN_PROGRESS = "invoiceInProgress"
 GOOGLE_API_SCOPES = ['https://www.googleapis.com/auth/calendar']
 GOOGLE_CLIENT_SECRET_FILE = 'google_api_secret.json'
 GOOGLE_TOKEN_FILE = 'google_token.json'
@@ -61,7 +62,8 @@ def jsonObject2Class(cls: type[T], jsonObject: JsonObject) -> T:
             typeOk = (type(jsonObject[fieldName]) is list and
                 all(isinstance(x, typing.get_args(fieldType)[0]) for x in jsonObject[fieldName])) # type: ignore
         else:
-            raise NotImplementedError("The type {} is not suported yet".format(typing.get_origin(fieldType)))
+            raise NotImplementedError("The type {} is not suported yet".format(
+                    typing.get_origin(fieldType)))
         if not typeOk:
             if jsonObject[fieldName] is None:
                 print("The field {} cannot be None in {}".format(fieldName, jsonObject),
@@ -78,8 +80,13 @@ class InvoiceUnit(enum.Enum):
     DAY = enum.auto()
 
 
+class InvoiceRateRound(enum.Enum):
+    SUBTOTAL = enum.auto()
+    TOTAL = enum.auto()
+
+
 @dataclasses.dataclass
-class KimaiCustomer():
+class KimaiCustomer:
     id: int
     name: str
     number: str
@@ -107,6 +114,15 @@ class KimaiCustomer():
         return None
 
     @property
+    def invoiceRateRound(self) -> None|InvoiceRateRound:
+        if self.comment is None:
+            return None
+        dataJson = json.loads(self.comment)
+        if "invoiceRateRound" in dataJson:
+            return InvoiceRateRound[dataJson["invoiceRateRound"]]
+        return None
+
+    @property
     def invoiceRemainingHours(self) -> None|float:
         if self.comment is None:
             return None
@@ -116,32 +132,36 @@ class KimaiCustomer():
         return None
 
     @invoiceRemainingHours.setter
-    def invoiceRemainingHours(self, invoiceRemainingHours: float):
+    def invoiceRemainingHours(self, invoiceRemainingHours: float|None):
         dataJson = JsonObject()
         if self.comment is not None:
             dataJson = json.loads(self.comment)
-        dataJson["invoiceRemainingHours"] = invoiceRemainingHours
+        if invoiceRemainingHours is None:
+            if "invoiceRemainingHours" in dataJson:
+                del dataJson["invoiceRemainingHours"]
+        else:
+            dataJson["invoiceRemainingHours"] = invoiceRemainingHours
         self.comment = json.dumps(dataJson)
 
     @property
-    def invoiceRemainingHoursNext(self) -> None|float:
+    def invoiceRemainingHoursInProgress(self) -> None|float:
         if self.comment is None:
             return None
         dataJson = json.loads(self.comment)
-        if "invoiceRemainingHoursNext" in dataJson:
-            return dataJson["invoiceRemainingHoursNext"]
+        if "invoiceRemainingHoursInProgress" in dataJson:
+            return dataJson["invoiceRemainingHoursInProgress"]
         return None
 
-    @invoiceRemainingHoursNext.setter
-    def invoiceRemainingHoursNext(self, invoiceRemainingHoursNext: float|None):
+    @invoiceRemainingHoursInProgress.setter
+    def invoiceRemainingHoursInProgress(self, invoiceRemainingHoursInProgress: float|None):
         dataJson = JsonObject()
         if self.comment is not None:
             dataJson = json.loads(self.comment)
-        if invoiceRemainingHoursNext is None:
-            if "invoiceRemainingHoursNext" in dataJson:
-                del dataJson["invoiceRemainingHoursNext"]
+        if invoiceRemainingHoursInProgress is None:
+            if "invoiceRemainingHoursInProgress" in dataJson:
+                del dataJson["invoiceRemainingHoursInProgress"]
         else:
-            dataJson["invoiceRemainingHoursNext"] = invoiceRemainingHoursNext
+            dataJson["invoiceRemainingHoursInProgress"] = invoiceRemainingHoursInProgress
         self.comment = json.dumps(dataJson)
 
 
@@ -214,7 +234,7 @@ class KimaiCustomerRates:
 
 
 @dataclasses.dataclass
-class KimaiProject():
+class KimaiProject:
     parentTitle: str
     customer: int
     id: int
@@ -260,7 +280,7 @@ class KimaiProjects:
 
 
 @dataclasses.dataclass
-class KimaiActivity():
+class KimaiActivity:
     parentTitle: str
     project: int
     id: int
@@ -310,7 +330,7 @@ class KimaiActivities:
 
 
 @dataclasses.dataclass
-class KimaiTimeSheet():
+class KimaiTimeSheet:
     activity: int
     project: int
     user: int
@@ -354,6 +374,9 @@ class KimaiTimeSheets:
         return self._timeSheetsById.values()
 
 
+class ToDelete(enum.Enum):
+    TO_DELETE = enum.auto()
+
 class Kimai:
     def __init__(self, url: str, username:str, password: str):
         self._url = url
@@ -363,13 +386,16 @@ class Kimai:
     def _buildheader(self):
         return {"X-AUTH-USER": self._username, "X-AUTH-TOKEN": self._password}
 
-    def _runRequest(self, method:str, urlSufix: str, params:RequestParam|None={}, data: JsonObject|None=None):
-        response = requests.request(method, self._url + "/" + urlSufix, params=params, headers=self._buildheader(), data=data)
+    def _runRequest(self, method:str, urlSufix: str, params:RequestParam|None={},
+            data: JsonObject|None=None):
+        response = requests.request(method, self._url + "/" + urlSufix, params=params,
+                headers=self._buildheader(), data=data)
         if response.status_code != 200:
             print('For request "{}" get {}'.format(response.url, response.json()), file=sys.stderr)
             sys.exit(1)
         if response.headers.get("X-Total-Pages", "1") != "1":
-            print('For request "{}" get too much result: {}'.format(response.url, response.headers["X-Total-Count"]), file=sys.stderr)
+            print('For request "{}" get too much result: {}'.format(response.url,
+                    response.headers["X-Total-Count"]), file=sys.stderr)
             sys.exit(1)
         return response.json()
 
@@ -380,7 +406,26 @@ class Kimai:
         customerJson = self._runRequest("get", "customers/{}".format(id))
         return jsonObject2Class(KimaiCustomerDetails, customerJson)
 
-    def updateCustomer(self, id: int, data: JsonObject) -> KimaiCustomerDetails:
+    def updateCustomer(self, id: int, invoiceRemainingHours: float|None = None,
+                invoiceRemainingHoursInProgress: float|None|ToDelete = None) -> KimaiCustomerDetails:
+        customer = None
+        data = JsonObject()
+        if invoiceRemainingHours != None:
+            if customer == None:
+                customer = kimai.getCustomer(id)
+            customer.invoiceRemainingHours = invoiceRemainingHours
+            data["comment"] = customer.comment
+        if invoiceRemainingHoursInProgress != None:
+            if customer == None:
+                customer = kimai.getCustomer(id)
+            if invoiceRemainingHoursInProgress == ToDelete.TO_DELETE:
+                customer.invoiceRemainingHoursInProgress = None
+            else:
+                customer.invoiceRemainingHoursInProgress = invoiceRemainingHoursInProgress
+            data["comment"] = customer.comment
+        if len(data)==0:
+            print("You must set at least one argument", file=sys.stderr)
+            sys.exit(1)
         customerJson = self._runRequest("patch", "customers/{}".format(id), data=data)
         return jsonObject2Class(KimaiCustomerDetails, customerJson)
 
@@ -399,12 +444,19 @@ class Kimai:
         activityJson = self._runRequest("get", "activities/{}".format(id))
         return jsonObject2Class(KimaiActivityDetails, activityJson)
 
-    def updateActivity(self, id: int, data: JsonObject) -> KimaiActivityDetails:
+    def updateActivity(self, id: int, timeBudgetHour: float|None = None) -> KimaiActivityDetails:
+        data = JsonObject()
+        if timeBudgetHour != None:
+            data["timeBudget"] = timeBudgetHour
+        if len(data)==0:
+            print("You must set at least one argument", file=sys.stderr)
+            sys.exit(1)
         customerJson = self._runRequest("patch", "activities/{}".format(id), data=data)
         return jsonObject2Class(KimaiActivityDetails, customerJson)
 
     def getTimesheets(self, begin:str|None=None, maxItem: int|None=None, billable: bool|None=None,
-                exported: bool|None=None, active: bool|None=None, tags: list[str]|None=None) -> KimaiTimeSheets:
+                exported: bool|None=None, active: bool|None=None, tags: list[str]|None=None) \
+                -> KimaiTimeSheets:
         params:RequestParam = RequestParam()
         if begin is not None:
             params["begin"] = begin
@@ -418,7 +470,7 @@ class Kimai:
             params["active"] = "1" if active else "0"
         if tags is not None:
             params["tags[]"] = tags # type: ignore
-        timesheetsJson = self._runRequest("get", "timesheets", params)
+        timesheetsJson = self._runRequest("get", "timesheets", params=params)
         return KimaiTimeSheets(timesheetsJson)
 
     def addTimesheet(self, userId: int, projectId: int, activityId: int, begin: str, end: str,
@@ -432,10 +484,18 @@ class Kimai:
         data["description"] = description
         return self._runRequest("post", "timesheets", data=data)
 
-    def addTimesheetTag(self, timeSheetId: int, tags: list[str]) -> JsonObject:
+    def updateTimesheet(self, timeSheetId: int, tags: list[str]|None=None,
+            exported: bool|None = None) -> KimaiTimeSheet:
         data = JsonObject()
-        data["tags"] = typing.cast(JsonList, tags)
-        return self._runRequest("patch", "timesheets/{}".format(timeSheetId), data=data)
+        if tags != None:
+            data["tags"] = ", ".join(tags)
+        if exported != None:
+            data["exported"] = exported
+        if len(data)==0:
+            print("You must set at least one argument", file=sys.stderr)
+            sys.exit(1)
+        timeSheetJson = self._runRequest("patch", "timesheets/{}".format(timeSheetId), data=data)
+        return jsonObject2Class(KimaiTimeSheet, timeSheetJson)
 
 
 def getConfigPath(fileName: str) -> str:
@@ -487,7 +547,7 @@ def googleApiGetCredentials(secretFilePath: str, tokenFilePath: str):
 
 
 @dataclasses.dataclass
-class GCalendarEvent():
+class GCalendarEvent:
     summary: str
     start: str
     end: str
@@ -519,7 +579,8 @@ def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, serv
         message = str(err)
         if err.resp.get('content-type', '').startswith('application/json'):
             message = json.loads(err.content).get('error').get('errors')[0].get('message')
-        print('Error while pushing event "{}" at {}: "{}"'.format(event.summary, event.start, message))
+        print('Error while pushing event "{}" at {}: "{}"'.format(event.summary, event.start,
+                message))
 
 def importEventFile(timesheetsFilePath: str, kimaiUserId: int, kimai: Kimai):
         with open(timesheetsFilePath, 'r') as eventsFile:
@@ -571,8 +632,8 @@ def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str
                     GOOGLE_CLIENT_SECRET_FILE), getConfigPath(GOOGLE_TOKEN_FILE))
                 googleCalendarService = build("calendar", "v3", credentials=googleCredentials)
             project = projects.get(timeSheet.project)
-            googleCalendarEvent = GCalendarEvent.fromKimaiTimeSheet(timeSheet, customers.get(project.customer).name,
-                    project.name, activities.get(timeSheet.activity).name)
+            googleCalendarEvent = GCalendarEvent.fromKimaiTimeSheet(timeSheet, customers.get(
+                    project.customer).name, project.name, activities.get(timeSheet.activity).name)
             googleApiPushEventToCalendar(googleCalendarEvent, gCalendarEmail,
                     googleCalendarService)
             tags = timeSheet.tags
@@ -587,7 +648,8 @@ def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
     customers = kimai.getCustomers()
     projects = kimai.getProjects()
     activities = kimai.getActivities()
-    craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] = dict()
+    craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] \
+            = dict()
     locale.setlocale(locale.LC_ALL, locale.getlocale())
     dateFormat = locale.nl_langinfo(locale.D_FMT)
     activitiesByCustomerProject: dict[str, dict[str, set[str]]] = dict()
@@ -605,10 +667,13 @@ def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
         if project.name not in craByCustomerDateProjectActivity[customerName][date]:
             craByCustomerDateProjectActivity[customerName][date][project.name] = dict()
         if activityName not in craByCustomerDateProjectActivity[customerName][date][project.name]:
-            craByCustomerDateProjectActivity[customerName][date][project.name][activityName] = CraItem()
-        craByCustomerDateProjectActivity[customerName][date][project.name][activityName].duration += timeSheet.duration
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName] \
+                    = CraItem()
+        craByCustomerDateProjectActivity[customerName][date][project.name][activityName].duration \
+                += timeSheet.duration
         for descriptionLine in timeSheet.description.replace("\r", "").split("\n"):
-            craByCustomerDateProjectActivity[customerName][date][project.name][activityName].description.add(descriptionLine)
+            craByCustomerDateProjectActivity[customerName][date][project.name][activityName] \
+                    .description.add(descriptionLine)
         # Add to activitiesByCustomerProject
         if customerName not in activitiesByCustomerProject:
             activitiesByCustomerProject[customerName] = dict()
@@ -635,14 +700,16 @@ def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
                 description: set[str] = set()
                 for projectName, activities in activitiesByCustomerProject[customerName].items():
                     for activityName in activities:
-                        craItem = craByProjectActivity.get(projectName, dict()).get(activityName, CraItem())
+                        craItem = craByProjectActivity.get(projectName, dict()).get(activityName,
+                                CraItem())
                         durationSum += craItem.duration
                         description.update(craItem.description)
                         dataLine += "\t"
                         if craItem.duration != 0:
                             dataLine += locale.str(craItem.duration/3600)
                 craFile.write("{}\t{}{}\t{}\n".format(date.strftime(dateFormat),
-                        locale.str(durationSum/3600), dataLine, ", ".join(description).replace("\t", " ")))
+                        locale.str(durationSum/3600), dataLine, ", ".join(description).replace(
+                        "\t", " ")))
 
 
 @dataclasses.dataclass
@@ -655,6 +722,8 @@ class InvoiceLine:
     durationHour: float = 0.0
     durationHourFloor: float = 0.0
     unit: InvoiceUnit|None = None
+    rateRound: InvoiceRateRound|None = None
+    vatRate: float = 0.0
 
     @property
     def unitRate(self) -> float:
@@ -686,20 +755,31 @@ class InvoiceLine:
 
     @property
     def rate(self) -> float:
-        return self.rateHour * self.unitRate
+        toReturn = self.rateHour * self.unitRate
+        if self.rateRound == InvoiceRateRound.SUBTOTAL:
+            return round(toReturn)
+        elif self.rateRound == InvoiceRateRound.TOTAL:
+            return round(toReturn*(1+self.vatRate))/(1+self.vatRate)
+        else:
+            return toReturn
 
     @property
-    def total(self) -> float:
-        return self.rateHour * self.durationHour
+    def subtotal(self) -> float:
+        return self.rate * self.duration
 
     @property
-    def totalFloor(self) -> float:
-        return self.rateHour * self.durationHourFloor
+    def subtotalFloor(self) -> float:
+        return self.rate * self.durationFloor
 
     def updateDurationFloor(self, value: float):
         duration = math.floor(self.duration / value) * value
         diffHour = (self.duration - duration) * self.unitRate
         self.durationHourFloor = self.durationHour - diffHour
+
+    def __str__(self) -> str:
+        return "InvoiceLine(project={}, activity={}, rate={}, duration={}, unit={}, subtotal={})" \
+                .format(self.projectName, self.activityName, self.rate, self.durationFloor,
+                self.unit, self.subtotalFloor)
 
 
 @dataclasses.dataclass
@@ -738,7 +818,8 @@ class InvoiceHeader:
 class Invoice:
     REMAINING_FLOOR = 0.5
 
-    def __init__(self, num: int, customer: KimaiCustomerDetails, date: datetime.date, lineByProjectActivity : dict[str, dict[str, InvoiceLine]], vatRate: float):
+    def __init__(self, num: int, customer: KimaiCustomerDetails, date: datetime.date,
+            lineByProjectActivity : dict[str, dict[str, InvoiceLine]], vatRate: float):
         self._num = num
         self._customer = customer
         self._date = date
@@ -746,10 +827,13 @@ class Invoice:
         self._lines: list[InvoiceLine] = []
         self._subtotal = 0.0
         self._subtotalFloor = 0.0
-        self._remainingHour = 0.0 if customer.invoiceRemainingHours is None else customer.invoiceRemainingHours
+        self._remainingHour = (0.0 if customer.invoiceRemainingHours is None
+                else customer.invoiceRemainingHours)
         for lineByActivity in lineByProjectActivity.values():
             for line in lineByActivity.values():
                 line.unit = self._customer.invoiceUnit
+                line.rateRound = self._customer.invoiceRateRound
+                line.vatRate = vatRate
                 line.updateDurationFloor(Invoice.REMAINING_FLOOR)
                 self._remainingHour += line.durationHour - line.durationHourFloor
                 REMAINING_FLOOR_HOUR = Invoice.REMAINING_FLOOR * line.unitRate
@@ -757,16 +841,30 @@ class Invoice:
                     self._remainingHour -= REMAINING_FLOOR_HOUR
                     line.durationHourFloor += REMAINING_FLOOR_HOUR
                 self._lines.append(line)
-                self._subtotal += line.total
-                self._subtotalFloor += line.totalFloor
+                self._subtotal += line.subtotal
+                self._subtotalFloor += line.subtotalFloor
         self._remainingHour = round(self._remainingHour, 2)
         self._lines.sort(key=lambda item : item.begin)
 
     @property
     def header(self) -> InvoiceHeader:
-        return InvoiceHeader(self._num, self._date, self._subtotal, self._subtotalFloor, self._vatRate)
+        return InvoiceHeader(self._num, self._date, self._subtotal, self._subtotalFloor,
+                self._vatRate)
 
-    def generateInvoiceFile(self, templateFilePath: str):
+    @property
+    def remainingHour(self) -> float:
+        return self._remainingHour
+
+    def __str__(self) -> str:
+        toReturn = "Invoice(customer={},\n".format(self._customer.name)
+        for line in self._lines:
+            toReturn += "  " + str(line) + ",\n"
+        header = self.header
+        toReturn += "  subtotalFloor={}, taxFloor={}, totalFloor={}, remainingHour={})".format(
+                self._subtotalFloor, header.taxFloor, header.totalFloor, self._remainingHour)
+        return toReturn
+
+    def generateInvoiceFile(self, templateFilePath: str) -> float:
         templateFile = openpyxl.open(templateFilePath)
         tempateSheet = typing.cast(openpyxl.worksheet.worksheet.Worksheet, templateFile.active)
         lineIndex = 0
@@ -788,17 +886,10 @@ class Invoice:
             if isRowContainsInvoiceLine:
                 lineIndex += 1
         templateFile.save("{:%Y-%m}_facture_{}.xlsx".format(self._date, self._customer.name))
-        if self._customer.invoiceRemainingHoursNext is not None:
-            print('The customer {} already have invoice remaining hours next with value {} the new '
-                    'invoice remaining hours next {} is not saved'.format(self._customer.name,
-                    self._customer.invoiceRemainingHoursNext, self._remainingHour), file=sys.stderr)
-        else:
-            self._customer.invoiceRemainingHoursNext = self._remainingHour
-            data = JsonObject()
-            data["comment"] = self._customer.comment
-            kimai.updateCustomer(self._customer.id, data)
+        return self._remainingHour
 
-    def _copyRow(self, sheet: openpyxl.worksheet.worksheet.Worksheet, rowIndexSrc: int, rowIndexDst: int):
+    def _copyRow(self, sheet: openpyxl.worksheet.worksheet.Worksheet, rowIndexSrc: int,
+            rowIndexDst: int):
         sheet.insert_rows(rowIndexDst)
         if rowIndexDst < rowIndexSrc:
             rowIndexSrc += 1
@@ -844,10 +935,12 @@ class Invoice:
                     elif toReplaceName[2] == "year":
                         toReplaceValue = toReplaceValue.year
                     else:
-                        print('Template value "{}" not supported for a date'.format(toReplaceName), file=sys.stderr)
+                        print('Template value "{}" not supported for a date'.format(toReplaceName),
+                                file=sys.stderr)
                         sys.exit(1)
                 else:
-                    print('Template value "{}" not supported for {}'.format(toReplaceName, type(toReplaceValue)), file=sys.stderr)
+                    print('Template value "{}" not supported for {}'.format(toReplaceName,
+                            type(toReplaceValue)), file=sys.stderr)
                     sys.exit(1)
             if type(toReplaceValue) == datetime.date:
                 toReplaceValue = toReplaceValue.strftime(dateFormat)
@@ -872,6 +965,10 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
     invoiceLineByCustomerProjectActivity: dict[int, dict[str, dict[str, InvoiceLine]]] = dict()
     for timeSheet in timeSheets.values():
         # Get time sheet data
+        if KIMAI_TAG_FOR_INVOICE_IN_PROGRESS in timeSheet.tags:
+            print("There are some invoice in progress {}. You must cancel or summit it before "
+                  "start a new invoice".format(timeSheet), file=sys.stderr)
+            sys.exit(1)
         project = projects.get(timeSheet.project)
         activity = activities.get(timeSheet.activity)
         if project.customer not in invoiceLineByCustomerProjectActivity:
@@ -888,22 +985,48 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
                     = InvoiceLine(project.name, activity.name, timeSheet.getBegin().date(),
                     timeSheet.getEnd().date(), rate)
         else:
-            if timeSheet.getBegin().date() < invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin:
-                invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].begin = timeSheet.getBegin().date()
-            if timeSheet.getEnd().date() > invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].end:
-                invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].end = timeSheet.getEnd().date()
-        invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name].durationHour += timeSheet.duration/3600.0
-        invoiceLine = invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name]
+            if timeSheet.getBegin().date() < invoiceLineByCustomerProjectActivity \
+                    [project.customer][project.name][activity.name].begin:
+                invoiceLineByCustomerProjectActivity[project.customer][project.name] \
+                        [activity.name].begin = timeSheet.getBegin().date()
+            if timeSheet.getEnd().date() > invoiceLineByCustomerProjectActivity[project.customer] \
+                    [project.name][activity.name].end:
+                invoiceLineByCustomerProjectActivity[project.customer][project.name] \
+                        [activity.name].end = timeSheet.getEnd().date()
+        invoiceLineByCustomerProjectActivity[project.customer][project.name][activity.name] \
+                .durationHour += timeSheet.duration/3600.0
+        invoiceLine = invoiceLineByCustomerProjectActivity[project.customer][project.name] \
+                [activity.name]
         if abs(invoiceLine.rateHour * timeSheet.duration/3600.0 - timeSheet.rate) >= 0.01:
-            print("Computed time sheet price not the same as kimai time sheet price: {} * {} = {} != {}"
-                  .format(invoiceLine.rateHour, timeSheet.duration/3600.0, invoiceLine.rateHour * timeSheet.duration/3600.0, timeSheet.rate), file=sys.stderr)
+            print("Computed time sheet price not the same as kimai time sheet price: {} * {} = {} "
+                    "!= {}".format(invoiceLine.rateHour, timeSheet.duration/3600.0,
+                    invoiceLine.rateHour * timeSheet.duration/3600.0, timeSheet.rate),
+                    file=sys.stderr)
             sys.exit(1)
     invoiceNum = 0
     for customerId, invoiceLineByProjectActivity in invoiceLineByCustomerProjectActivity.items():
         invoiceNum += 1
         customer = kimai.getCustomer(customerId)
-        invoice = Invoice(invoiceNum, customer, datetime.date.today(), invoiceLineByProjectActivity, vatRate)
+        invoice = Invoice(invoiceNum, customer, datetime.date.today(), invoiceLineByProjectActivity,
+                vatRate)
+        print(invoice)
         invoice.generateInvoiceFile(templateFilePath)
+        if customer.invoiceRemainingHoursInProgress is not None:
+            print('The customer {} already have invoice remaining hours in progress with value {}'
+                    .format(customer.name, customer.invoiceRemainingHoursInProgress),
+                    file=sys.stderr)
+            sys.exit(1)
+        else:
+            kimai.updateCustomer(customer.id, invoiceRemainingHoursInProgress=invoice.remainingHour)
+            print("Customer: {} invoiceRemainingHoursInProgress: {} => {}".format(customer.name,
+                    customer.invoiceRemainingHoursInProgress, invoice.remainingHour))
+            customer.invoiceRemainingHoursInProgress = invoice.remainingHour
+    for timeSheet in timeSheets.values():
+        tags = timeSheet.tags.copy()
+        tags.append(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
+        kimai.updateTimesheet(timeSheet.id, tags=tags)
+        print("TimeSheet: {} tags: {} => {}".format(timeSheet.begin, timeSheet.tags, tags))
+        timeSheet.tags = tags
 
 
 if __name__ == '__main__':
@@ -937,10 +1060,12 @@ if __name__ == '__main__':
             "day, project and activity with duration in hour and description")
     groupAction.add_argument('--invoice', action='store_true',
             help="Generate an invoice file in current dir for each customer using remaining hours")
-    groupAction.add_argument('--invoiceRemainingHoursNextCancel', action='store_true',
-            help="Delete all customer invoice remaining hours next")
-    groupAction.add_argument('--invoiceRemainingHoursNextSubmit', action='store_true',
-            help="Delete all customer invoice remaining hours next")
+    groupAction.add_argument('--invoiceInProgressCancel', action='store_true',
+            help="Delete all customer invoice remaining hours in progress and remove all {} time "
+            "sheet tags".format(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS))
+    groupAction.add_argument('--invoiceInProgressSubmit', action='store_true',
+            help="Replace all customer invoice remaining hours by the in progress value and "
+            "replace all {} time sheet tags by exported mark")
     parser.add_argument("--kimaiUrl", type=str, help="The Kimai url with protocol and /api "
             "exemple http://nas.local:8001/api (can be saved in config file)")
     parser.add_argument("--kimaiUsername", type=str, help="The Kimai username (can be saved in "
@@ -953,8 +1078,8 @@ if __name__ == '__main__':
     parser.add_argument("--invoiceTemplate", type=str, help="The invoice template filepath to "
             "generate invoice file")
     parser.add_argument("--vatRate", type=float, help="The VAT rate to generate invoice")
-    parser.add_argument("--timeBudget", type=float, help="When use --updateActivity update the time "
-            "budget with the given time in hour")
+    parser.add_argument("--timeBudget", type=float, help="When use --updateActivity update the "
+            "time budget with the given time in hour")
     parser.add_argument("--invoiceRemainingHours", type=float, help="When use --updateCustomer "
             "update the invoice remaining hours with the given float")
     argcomplete.autocomplete(parser)
@@ -1005,16 +1130,8 @@ if __name__ == '__main__':
         print(kimai.getCustomer(args.getCustomer))
 
     if args.updateCustomer:
-        data = JsonObject()
-        if args.invoiceRemainingHours:
-            customer = kimai.getCustomer(args.updateCustomer)
-            customer.invoiceRemainingHours = args.invoiceRemainingHours
-            data["comment"] = customer.comment
-        if len(data)==0:
-            print("You must use at least one argument associate with the command updateCustomer",
-                    file=sys.stderr)
-            sys.exit(1)
-        print(kimai.updateCustomer(args.updateCustomer, data))
+        print(kimai.updateCustomer(args.updateCustomer,
+                invoiceRemainingHours=args.invoiceRemainingHours))
 
     if args.getCustomerRate:
         for customerRate in kimai.getCustomerRates(args.getCustomerRate).customerRatesById.values():
@@ -1032,14 +1149,7 @@ if __name__ == '__main__':
         print(kimai.getActivity(args.getActivity))
 
     if args.updateActivity:
-        data = JsonObject()
-        if args.timeBudget:
-            data["timeBudget"] = args.timeBudget
-        if len(data)==0:
-            print("You must use at least one argument associate with the command updateActivity",
-                    file=sys.stderr)
-            sys.exit(1)
-        print(kimai.updateActivity(args.updateActivity, data))
+        print(kimai.updateActivity(args.updateActivity, timeBudgetHour=args.timeBudget))
 
     if args.getTimesheets:
         for timesheet in kimai.getTimesheets().timesheetsById.values():
@@ -1070,21 +1180,48 @@ if __name__ == '__main__':
             sys.exit(1)
         generateInvoiceFiles(kimai, configData.invoiceTemplate, configData.vatRate)
 
-    if args.invoiceRemainingHoursNextCancel:
+    if args.invoiceInProgressCancel:
         customers = kimai.getCustomers()
         for customer in customers.customersById.values():
-            if customer.invoiceRemainingHoursNext is not None:
-                customer.invoiceRemainingHoursNext = None
-                data = JsonObject()
-                data["comment"] = customer.comment
-                print(kimai.updateCustomer(customer.id, data))
+            if customer.invoiceRemainingHoursInProgress is not None:
+                kimai.updateCustomer(customer.id,
+                        invoiceRemainingHoursInProgress=ToDelete.TO_DELETE)
+                print("Customer: {} tags: {} => {}".format(customer.name,
+                        customer.invoiceRemainingHoursInProgress, None))
+                customer.invoiceRemainingHoursInProgress = None
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        for timesheet in timesheets.values():
+            tags = timesheet.tags.copy()
+            tags.remove(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
+            kimai.updateTimesheet(timesheet.id, tags=tags)
+            print("TimeSheet: {} tags: {} => {}".format(timesheet.begin, timesheet.tags, tags))
+            timesheet.tags = tags
 
-    if args.invoiceRemainingHoursNextSubmit:
+    if args.invoiceInProgressSubmit:
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        for timesheet in timesheets.values():
+            if timesheet.exported:
+                print("The timesheet {} is tag {} and is already mark exported. Remove the tag or "
+                        "the exported mark and re-run this script".format(timesheet,
+                        KIMAI_TAG_FOR_INVOICE_IN_PROGRESS), file=sys.stderr)
+                sys.exit(1)
+            tags = timesheet.tags.copy()
+            tags.remove(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
+            kimai.updateTimesheet(timesheet.id, exported=True, tags=tags)
+            print("TimeSheet: {} exported: {} => {}".format(timesheet.begin, timesheet.exported,
+                    True))
+            print("TimeSheet: {} tags: {} => {}".format(timesheet.begin, timesheet.tags, tags))
+            timesheet.exported = True
+            timesheet.tags = tags
         customers = kimai.getCustomers()
         for customer in customers.customersById.values():
-            if customer.invoiceRemainingHoursNext is not None:
-                customer.invoiceRemainingHours = customer.invoiceRemainingHoursNext
-                customer.invoiceRemainingHoursNext = None
-                data = JsonObject()
-                data["comment"] = customer.comment
-                print(kimai.updateCustomer(customer.id, data))
+            if customer.invoiceRemainingHoursInProgress is not None:
+                kimai.updateCustomer(customer.id,
+                        invoiceRemainingHours=customer.invoiceRemainingHoursInProgress,
+                        invoiceRemainingHoursInProgress=ToDelete.TO_DELETE)
+                print("Customer: {} invoiceRemainingHours: {} => {}".format(customer.name,
+                        customer.invoiceRemainingHours, customer.invoiceRemainingHoursInProgress))
+                print("Customer: {} invoiceRemainingHoursInProgress: {} => {}".format(customer.name,
+                        customer.invoiceRemainingHoursInProgress, None))
+                customer.invoiceRemainingHours = customer.invoiceRemainingHoursInProgress
+                customer.invoiceRemainingHoursInProgress = None
