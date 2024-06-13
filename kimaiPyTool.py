@@ -249,8 +249,7 @@ class KimaiProject:
 class KimaiProjects:
     def __init__(self, jsonList: JsonList):
         self._projectsById: dict[int, KimaiProject] = dict()
-        self._idsByName: dict[str, int] = dict()
-        self._idsByCustomerId: dict[int, list[int]] = dict()
+        self._idsByCustomerIdAndName: dict[int, dict[str, int]] = dict()
         for jsonValue in jsonList:
             if type(jsonValue) is not typing.get_origin(JsonObject):
                 raise TypeError('Unexpected type for {}, expected {}, get {}'
@@ -258,12 +257,12 @@ class KimaiProjects:
             jsonObject = typing.cast(JsonObject, jsonValue)
             project = jsonObject2Class(KimaiProject, jsonObject)
             self._projectsById[project.id] = project
-            if project.name in self._idsByName:
-                raise ValueError('The project name "{}" already exist'.format(project.name))
-            self._idsByName[project.name] = project.id
-            if project.customer not in self._idsByCustomerId:
-                self._idsByCustomerId[project.customer] = list()
-            self._idsByCustomerId[project.customer].append(project.id)
+            if project.customer not in self._idsByCustomerIdAndName:
+                self._idsByCustomerIdAndName[project.customer] = dict()
+            if project.name in self._idsByCustomerIdAndName[project.customer]:
+                raise ValueError('The project name "{}" already exist for customer {}'.format(
+                        project.name, project.customer))
+            self._idsByCustomerIdAndName[project.customer][project.name] = project.id
 
     @property
     def projectsById(self) -> dict[int, KimaiProject]:
@@ -272,11 +271,8 @@ class KimaiProjects:
     def get(self, id: int) -> KimaiProject:
         return self._projectsById[id]
 
-    def getIdByName(self, name: str) -> int:
-        return self._idsByName[name]
-
-    def getIdsByCustomerId(self, customerId: int) -> list[int]:
-        return self._idsByCustomerId[customerId]
+    def getIdByCustomerIdAndName(self, customerId: int, name: str) -> int:
+        return self._idsByCustomerIdAndName[project.customer][project.name]
 
 
 @dataclasses.dataclass
@@ -299,7 +295,7 @@ class KimaiActivityDetails(KimaiActivity):
 class KimaiActivities:
     def __init__(self, jsonList: JsonList):
         self._activitiesById: dict[int, KimaiActivity] = dict()
-        self._idsByName: dict[str, int] = dict()
+        self._idsByProjectIdAndName: dict[int, dict[str, int]] = dict()
         self._idsByProjectId: dict[int, list[int]] = dict()
         for jsonValue in jsonList:
             if type(jsonValue) is not typing.get_origin(JsonObject):
@@ -308,9 +304,12 @@ class KimaiActivities:
             jsonObject = typing.cast(JsonObject, jsonValue)
             activity = jsonObject2Class(KimaiActivity, jsonObject)
             self._activitiesById[activity.id] = activity
-            if activity.name in self._idsByName:
-                raise ValueError('The activity name "{}" already exist'.format(activity.name))
-            self._idsByName[activity.name] = activity.id
+            if activity.project not in self._idsByProjectIdAndName:
+                self._idsByProjectIdAndName[activity.project] = dict()
+            if activity.name in self._idsByProjectIdAndName[activity.project]:
+                raise ValueError('The activity name "{}" already exist for project {}'.format(
+                        activity.name, activity.project))
+            self._idsByProjectIdAndName[activity.project][activity.name] = activity.id
             if activity.project not in self._idsByProjectId:
                 self._idsByProjectId[activity.project] = list()
             self._idsByProjectId[activity.project].append(activity.id)
@@ -322,8 +321,8 @@ class KimaiActivities:
     def get(self, id: int) -> KimaiActivity:
         return self._activitiesById[id]
 
-    def getIdByName(self, name: str) -> int:
-        return self._idsByName[name]
+    def getIdByProjectIdAndName(self, projectId: int, name: str) -> int:
+        return self._idsByProjectIdAndName[projectId][name]
 
     def getIdsByProjectId(self, projectId: int) -> list[int]:
         return self._idsByProjectId[projectId]
@@ -585,15 +584,18 @@ def googleApiPushEventToCalendar(event: GCalendarEvent, calendarEmail: str, serv
 def importEventFile(timesheetsFilePath: str, kimaiUserId: int, kimai: Kimai):
         with open(timesheetsFilePath, 'r') as eventsFile:
             eventsData = json.loads(eventsFile.read())
+        customers = kimai.getCustomers()
         projects = kimai.getProjects()
         activities = kimai.getActivities()
         for eventData in eventsData:
+            customerName = eventData["customerName"]
+            customerId = customers.getIdByName(customerName)
             projectName = eventData["projectName"]
-            projectId = projects.getIdByName(projectName)
+            projectId = projects.getIdByCustomerIdAndName(customerId, projectName)
             activityId = None
             if "activityName" in eventData:
                 activityName = eventData["activityName"]
-                activityId = activities.getIdByName(activityName)
+                activityId = activities.getIdByProjectIdAndName(projectId, activityName)
             else:
                 activitiesIds = activities.getIdsByProjectId(projectId)
                 if len(activitiesIds) != 1:
