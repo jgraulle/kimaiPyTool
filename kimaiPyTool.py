@@ -636,9 +636,11 @@ def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str
                     project.customer).name, project.name, activities.get(timeSheet.activity).name)
             googleApiPushEventToCalendar(googleCalendarEvent, gCalendarEmail,
                     googleCalendarService)
-            tags = timeSheet.tags
+            tags = timeSheet.tags.copy()
             tags.append(KIMAI_TAG_FOR_GOOGLE_CALENDAR)
-            kimai.addTimesheetTag(timeSheet.id, tags)
+            kimai.updateTimesheet(timeSheet.id, tags=tags)
+            print("TimeSheet: {} tags: {} => {}".format(timeSheet.begin, timeSheet.tags, tags))
+            timeSheet.tags = tags
 
 
 def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
