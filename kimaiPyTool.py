@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 
 import argparse
@@ -38,6 +38,7 @@ KIMAI_TAG_FOR_INVOICE_IN_PROGRESS = "invoiceInProgress"
 GOOGLE_API_SCOPES = ['https://www.googleapis.com/auth/calendar']
 GOOGLE_CLIENT_SECRET_FILE = 'google_api_secret.json'
 GOOGLE_TOKEN_FILE = 'google_token.json'
+KIMAI_ITEM_MAX = 200
 
 
 T = typing.TypeVar("T")
@@ -616,7 +617,7 @@ class CraItem:
 
 def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str):
     beginStr = datetime.datetime.isoformat(begin)
-    timeSheets = kimai.getTimesheets(begin=beginStr)
+    timeSheets = kimai.getTimesheets(begin=beginStr, maxItem=KIMAI_ITEM_MAX)
     googleCalendarService = None
     customers = kimai.getCustomers()
     projects = kimai.getProjects()
@@ -648,7 +649,7 @@ def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str
 def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
     beginStr = datetime.datetime.isoformat(begin)
     end = datetime.date.today()
-    timeSheets = kimai.getTimesheets(begin=beginStr, maxItem=100)
+    timeSheets = kimai.getTimesheets(begin=beginStr, maxItem=KIMAI_ITEM_MAX)
     customers = kimai.getCustomers()
     projects = kimai.getProjects()
     activities = kimai.getActivities()
@@ -963,7 +964,7 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
     if not templateFilePath.endswith(".xlsx"):
         print("Only support excel xlsx file", file=sys.stderr)
         sys.exit(1)
-    timeSheets = kimai.getTimesheets(maxItem=100, billable=True, exported=False, active=False)
+    timeSheets = kimai.getTimesheets(maxItem=KIMAI_ITEM_MAX, billable=True, exported=False, active=False)
     projects = kimai.getProjects()
     activities = kimai.getActivities()
     invoiceLineByCustomerProjectActivity: dict[int, dict[str, dict[str, InvoiceLine]]] = dict()
@@ -1193,7 +1194,7 @@ if __name__ == '__main__':
                 print("Customer: {} tags: {} => {}".format(customer.name,
                         customer.invoiceRemainingHoursInProgress, None))
                 customer.invoiceRemainingHoursInProgress = None
-        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS], maxItem=KIMAI_ITEM_MAX)
         for timesheet in timesheets.values():
             tags = timesheet.tags.copy()
             tags.remove(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
@@ -1202,7 +1203,7 @@ if __name__ == '__main__':
             timesheet.tags = tags
 
     if args.invoiceInProgressSubmit:
-        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS], maxItem=KIMAI_ITEM_MAX)
         for timesheet in timesheets.values():
             if timesheet.exported:
                 print("The timesheet {} is tag {} and is already mark exported. Remove the tag or "
