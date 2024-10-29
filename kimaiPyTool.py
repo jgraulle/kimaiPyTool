@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 
 import argparse
@@ -616,7 +616,7 @@ class CraItem:
 
 def kimaiToGCalendar(begin: datetime.datetime, kimai: Kimai, gCalendarEmail: str):
     beginStr = datetime.datetime.isoformat(begin)
-    timeSheets = kimai.getTimesheets(begin=beginStr)
+    timeSheets = kimai.getTimesheets(begin=beginStr, maxItem=100)
     googleCalendarService = None
     customers = kimai.getCustomers()
     projects = kimai.getProjects()
@@ -1193,7 +1193,7 @@ if __name__ == '__main__':
                 print("Customer: {} tags: {} => {}".format(customer.name,
                         customer.invoiceRemainingHoursInProgress, None))
                 customer.invoiceRemainingHoursInProgress = None
-        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS], maxItem=100)
         for timesheet in timesheets.values():
             tags = timesheet.tags.copy()
             tags.remove(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
@@ -1202,7 +1202,7 @@ if __name__ == '__main__':
             timesheet.tags = tags
 
     if args.invoiceInProgressSubmit:
-        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS])
+        timesheets = kimai.getTimesheets(tags=[KIMAI_TAG_FOR_INVOICE_IN_PROGRESS], maxItem=100)
         for timesheet in timesheets.values():
             if timesheet.exported:
                 print("The timesheet {} is tag {} and is already mark exported. Remove the tag or "
