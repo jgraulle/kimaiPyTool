@@ -203,6 +203,9 @@ class KimaiCustomers:
     def get(self, id: int) -> KimaiCustomer:
         return self._customersById[id]
 
+    def containsName(self, name: str) -> bool:
+        return name in self._idsByName
+
     def getIdByName(self, name: str) -> int:
         return self._idsByName[name]
 
@@ -960,10 +963,15 @@ class Invoice:
         return result, isLine
 
 
-def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
+def generateInvoiceFiles(kimai: Kimai, customerNameList: list[str], templateFilePath: str, vatRate: float):
     if not templateFilePath.endswith(".xlsx"):
         print("Only support excel xlsx file", file=sys.stderr)
         sys.exit(1)
+    customers = kimai.getCustomers()
+    for customerName in customerNameList:
+        if not customers.containsName(customerName):
+            print(f"The customer {customerName} not found", file=sys.stderr)
+            sys.exit(1)
     timeSheets = kimai.getTimesheets(maxItem=KIMAI_ITEM_MAX, billable=True, exported=False, active=False)
     projects = kimai.getProjects()
     activities = kimai.getActivities()
@@ -1012,6 +1020,8 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
     for customerId, invoiceLineByProjectActivity in invoiceLineByCustomerProjectActivity.items():
         invoiceNum += 1
         customer = kimai.getCustomer(customerId)
+        if len(customerNameList) != 0 and customer.name not in customerNameList:
+            continue
         invoice = Invoice(invoiceNum, customer, datetime.date.today(), invoiceLineByProjectActivity,
                 vatRate)
         print(invoice)
@@ -1027,6 +1037,11 @@ def generateInvoiceFiles(kimai: Kimai, templateFilePath: str, vatRate: float):
                     customer.invoiceRemainingHoursInProgress, invoice.remainingHour))
             customer.invoiceRemainingHoursInProgress = invoice.remainingHour
     for timeSheet in timeSheets.values():
+        if len(customerNameList) != 0:
+            project = projects.get(timeSheet.project)
+            customer = customers.get(project.customer)
+            if customer.name not in customerNameList:
+                continue
         tags = timeSheet.tags.copy()
         tags.append(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS)
         kimai.updateTimesheet(timeSheet.id, tags=tags)
@@ -1063,8 +1078,9 @@ if __name__ == '__main__':
     groupAction.add_argument('--cra', type=lambda s: datetime.datetime.strptime(s,
             '%Y-%m-%d'), help="Generate a file in current dir for each customer with one line by "
             "day, project and activity with duration in hour and description")
-    groupAction.add_argument('--invoice', action='store_true',
-            help="Generate an invoice file in current dir for each customer using remaining hours")
+    groupAction.add_argument('--invoice', type=str, nargs="*",
+            help="Generate an invoice file in current dir for each given customer or all if empty "
+            "using remaining hours")
     groupAction.add_argument('--invoiceInProgressCancel', action='store_true',
             help="Delete all customer invoice remaining hours in progress and remove all {} time "
             "sheet tags".format(KIMAI_TAG_FOR_INVOICE_IN_PROGRESS))
@@ -1176,14 +1192,14 @@ if __name__ == '__main__':
     if args.cra:
         generateCraFiles(args.cra, kimai)
 
-    if args.invoice:
+    if args.invoice is not None:
         if configData.invoiceTemplate is None:
             print("Invoice template file path not defined", file=sys.stderr)
             sys.exit(1)
         if configData.vatRate is None:
             print("Invoice VAT rate not defined", file=sys.stderr)
             sys.exit(1)
-        generateInvoiceFiles(kimai, configData.invoiceTemplate, configData.vatRate)
+        generateInvoiceFiles(kimai, args.invoice, configData.invoiceTemplate, configData.vatRate)
 
     if args.invoiceInProgressCancel:
         customers = kimai.getCustomers()
