@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 appname=kimaiPyTool
 
 if [ ! -d ~/.local/share/${appname} ]
