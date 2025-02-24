@@ -658,7 +658,7 @@ def generateCraFiles(begin: datetime.datetime, kimai: Kimai):
     activities = kimai.getActivities()
     craByCustomerDateProjectActivity: dict[str, dict[datetime.date, dict[str, dict[str, CraItem]]]] \
             = dict()
-    locale.setlocale(locale.LC_ALL, locale.getlocale())
+    locale.setlocale(locale.LC_ALL, '')
     dateFormat = locale.nl_langinfo(locale.D_FMT)
     activitiesByCustomerProject: dict[str, dict[str, set[str]]] = dict()
     for timeSheet in timeSheets.values():
@@ -917,7 +917,7 @@ class Invoice:
             return None, False
         lastCopyIndex = 0
         result = ""
-        locale.setlocale(locale.LC_ALL, locale.getlocale())
+        locale.setlocale(locale.LC_ALL, '')
         dateFormat = locale.nl_langinfo(locale.D_FMT)
         isLine = False
         while toReplaceIndexBegin != -1:
