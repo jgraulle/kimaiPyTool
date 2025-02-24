@@ -9,6 +9,16 @@ Setup
 =====
 For now is only compatible on Linux.
 
+Developement environement
+-------------------------
+
+    python3 -m venv venv
+    source venv/bin/activate
+    python3 -m pip install -r requirements.txt
+
+Runtime environement
+--------------------
+
 For google calendar you have to generate a google API OAuth 2.0 token file from
 https://developers.google.com/google-apps/calendar/quickstart/python#prerequisites.
 

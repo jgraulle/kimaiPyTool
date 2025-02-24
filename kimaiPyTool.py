@@ -982,8 +982,18 @@ def generateInvoiceFiles(kimai: Kimai, customerNameList: list[str], templateFile
             print("There are some invoice in progress {}. You must cancel or summit it before "
                   "start a new invoice".format(timeSheet), file=sys.stderr)
             sys.exit(1)
-        project = projects.get(timeSheet.project)
-        activity = activities.get(timeSheet.activity)
+        try:
+            project = projects.get(timeSheet.project)
+        except KeyError:
+            print("The project {} is not found maybe is set as not visible you have to set it as"
+                  " visible".format(timeSheet.project), file=sys.stderr)
+            sys.exit(1)
+        try:
+            activity = activities.get(timeSheet.activity)
+        except KeyError:
+            print("The activity {} is not found maybe is set as not visible you have to set it as"
+                  " visible".format(timeSheet.activity), file=sys.stderr)
+            sys.exit(1)
         if project.customer not in invoiceLineByCustomerProjectActivity:
             invoiceLineByCustomerProjectActivity[project.customer] = dict()
         if project.name not in invoiceLineByCustomerProjectActivity[project.customer]:
